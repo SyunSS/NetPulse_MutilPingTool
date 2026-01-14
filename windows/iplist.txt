@@ -1,0 +1,15 @@
+store.steampowered.com 80
+ps5.np.playstation.net
+remoteplay.dl.playstation.net
+id.sonyentertainmentnetwork.com
+my.account.sony.com
+store.playstation.com
+account.sonyentertainmentnetwork.com
+www.playstation.com
+api.steampowered.com
+login.live.com
+accounts.nintendo.com
+networktest.xboxlive.com
+gst.prod.dl.playstation.net
+post.net.playstation.net
+ctest-dl-lp1.cdn.nintendo.net
