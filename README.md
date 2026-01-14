@@ -78,7 +78,7 @@ windows/iplist.txt
 
 ```text
 8.8.8.8
-8.8.8.8:53
+8.8.8.8 53
 223.5.5.5 53
 baidu.com
 ```
