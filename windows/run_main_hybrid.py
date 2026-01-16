@@ -135,7 +135,6 @@ def run_tcping(host, port):
         return "Timeout", "100%"
 
     times = []
-    success = 0
 
     try:
         out = subprocess.check_output(
@@ -144,23 +143,36 @@ def run_tcping(host, port):
             timeout=TcpingCount * 3
         ).decode(errors="ignore")
 
+        # 1️⃣ 解析 time= 用于算平均延迟
         for line in out.splitlines():
             if "time=" in line.lower():
                 try:
-                    ms = float(line.lower().split("time=")[1].replace("ms", ""))
+                    ms = float(
+                        line.lower()
+                        .split("time=")[1]
+                        .replace("ms", "")
+                        .strip()
+                    )
                     times.append(ms)
-                    success += 1
                 except:
                     pass
-    except Exception:
-        pass
 
-    if success == 0:
+        # 2️⃣ 解析 tcping summary 里的 fail%
+        fail_match = re.search(r"\(([\d\.]+)%\s*fail\)", out, re.IGNORECASE)
+        if fail_match:
+            loss = f"{fail_match.group(1)}%"
+        else:
+            # summary 没抓到，按全失败处理
+            loss = "100%"
+
+    except Exception:
         return "Timeout", "100%"
 
+    if not times:
+        return "Timeout", loss
+
     avg = int(sum(times) / len(times))
-    loss = round((1 - success / TcpingCount) * 100, 1)
-    return avg, f"{loss}%"
+    return avg, loss
 
 # ==================================================
 # Worker
