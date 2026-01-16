@@ -2,6 +2,7 @@
 import subprocess
 import sys
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import re
@@ -86,6 +87,36 @@ print(f"InputFile      = {InputFile}")
 print("=============================\n")
 
 log(f"PingCount={PingCount}, TcpingCount={TcpingCount}, Threads={Threads}")
+
+# ==================================================
+# 显示当前出口 IP（新增）
+# ==================================================
+def show_myip_info():
+    try:
+        proc = subprocess.run(
+            ["curl", "myip.ipip.net"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+            text=True,
+            encoding="utf-8",
+            errors="ignore"
+        )
+        info = proc.stdout.strip()
+        if info:
+            print("🌐 当前出口 IP 信息：")
+            print(info)
+            print()
+            log(f"出口 IP 信息：{info}")
+        else:
+            print("🌐 当前出口 IP 信息：获取失败\n")
+            log("出口 IP 信息获取失败（无输出）")
+    except Exception as e:
+        print("🌐 当前出口 IP 信息：获取失败\n")
+        log(f"出口 IP 信息获取异常：{e}")
+
+# 👇 放在「配置下方 / 模式选择上方」
+show_myip_info()
 
 # ==================================================
 # 模式选择
@@ -255,10 +286,10 @@ with ThreadPoolExecutor(max_workers=Threads) as pool:
     for f in as_completed(futures):
         idx, line = f.result()
         results[idx] = line
-        print(line)   # ✅ 只在这里输出 result
+        print(line)
 
 # ==================================================
-# 写 result 文件（保持你原来的逻辑）
+# 写 result 文件（保持原逻辑）
 # ==================================================
 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 outfile = os.path.join(BASE_DIR, f"result_{ts}.txt")
