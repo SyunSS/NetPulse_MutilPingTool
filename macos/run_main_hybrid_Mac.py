@@ -91,28 +91,38 @@ def run_tcping(host, port):
 
     try:
         out = subprocess.check_output(
-            [exe, "-c", str(TcpingCount), host, str(port)],
+            [exe, host, str(port)],
             stderr=subprocess.STDOUT,
             timeout=TcpingCount * 3
         ).decode(errors="ignore")
 
-        # 成功次数
-        success_match = re.search(r"(\d+) successful", out)
-        success = int(success_match.group(1)) if success_match else 0
+        # probes / successful / failed
+        stat_match = re.search(
+            r"(\d+)\s+probes sent\.\s+(\d+)\s+successful,\s+(\d+)\s+failed\.",
+            out,
+            re.IGNORECASE | re.DOTALL
+        )
 
-        # 平均时延
-        avg_match = re.search(r"Average = ([\d\.]+)ms", out)
-        if avg_match and success > 0:
-            avg = avg_match.group(1)
-        else:
-            avg = "Timeout"
+        if not stat_match:
+            return "Timeout", "100%"
 
-        loss = round((1 - success / TcpingCount) * 100, 1)
+        probes = int(stat_match.group(1))
+        success = int(stat_match.group(2))
+        failed = int(stat_match.group(3))
+
+        if probes == 0 or success == 0:
+            return "Timeout", "100%"
+
+        # 平均延迟
+        avg_match = re.search(r"Average\s*=\s*([\d\.]+)ms", out)
+        avg = avg_match.group(1) if avg_match else "Timeout"
+
+        loss = round((failed / probes) * 100, 1)
         return avg, f"{loss}%"
 
     except Exception:
         return "Timeout", "100%"
-
+		
 # ======================
 # Worker
 # ======================
