@@ -107,6 +107,28 @@ threads = 10
 
 ---
 
+### 4️⃣ Windows 日志（Log）说明 ⭐
+
+Windows 版本**额外启用了日志（log）功能**，用于应对以下情况：
+
+- PowerShell / CMD 窗口被意外关闭  
+- EXE 运行过程中无法完整查看输出  
+- 编码、路径、权限等 Windows 特有问题  
+
+程序运行时会**同时生成两类文件**：
+
+```text
+result_YYYYMMDD_HHMMSS.txt   # 整理后的最终测试结果
+log_YYYYMMDD_HHMMSS.txt      # 完整运行日志（含调试信息）
+```
+
+- **result 文件**：用于查看最终测试数据  
+- **log 文件**：用于问题排查与过程回溯  
+
+即使窗口被关闭，也可以通过 log 文件查看完整执行过程。
+
+---
+
 ## 🍎 macOS 使用说明
 
 ### 1️⃣ 环境要求
@@ -156,6 +178,9 @@ result_YYYYMMDD_HHMMSS.txt
 baidu.com,TCP:443,82,0%
 ```
 
+> ℹ️ macOS 默认只生成 result 文件  
+> Windows 会同时生成 result + log
+
 ---
 
 ## 🧑‍💻 作者信息
@@ -168,3 +193,13 @@ baidu.com,TCP:443,82,0%
 ## 📜 License
 
 本项目为个人工具，供学习与交流使用。
+
+---
+
+### 💬 开发者碎碎念（非技术性说明）
+
+> 同一份逻辑代码：  
+> **macOS：写完就能跑**  
+> **Windows：要考虑控制台、编码、exe、权限、窗口关闭、日志兜底……**
+
+日志功能的存在，本质上是 **“被 Windows 复杂度逼出来的”** 😅
