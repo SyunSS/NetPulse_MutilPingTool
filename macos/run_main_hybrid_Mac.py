@@ -18,6 +18,28 @@ InputFile = "iplist.txt"
 
 print("### NetPulse macOS 版 ICMP / TCPing 测试工具 ###\n")
 
+print("【配置说明】")
+print(f"- ICMP Ping 次数 : {PingCount}")
+print(f"- TCPing 次数    : {TcpingCount}")
+print(f"- 默认 TCP 端口  : {DefaultTCPPort}")
+print(f"- 并发线程数    : {Threads}")
+print(f"- 输入文件      : {InputFile}\n")
+
+# ======================
+# 当前公网 IP（可选信息）
+# ======================
+try:
+    ip_info = subprocess.check_output(
+        ["curl", "-s", "myip.ipip.net"],
+        timeout=5
+    ).decode(errors="ignore").strip()
+
+    if ip_info:
+        print(f"🌐 当前公网 IP 信息：{ip_info}\n")
+except Exception:
+    # 获取失败不影响主流程
+    pass
+
 # ======================
 # 模式选择
 # ======================
@@ -68,11 +90,9 @@ def run_ping(host):
             cmd, stderr=subprocess.STDOUT, timeout=PingCount * 3
         ).decode(errors="ignore")
 
-        # 丢包率
         loss_match = re.search(r"(\d+\.?\d*)% packet loss", out)
         loss = f"{loss_match.group(1)}%" if loss_match else "100%"
 
-        # 平均时延
         avg_match = re.search(r"round-trip min/avg/max/.* = [\d\.]+/([\d\.]+)/", out)
         avg = avg_match.group(1) if avg_match else "Timeout"
 
@@ -96,7 +116,6 @@ def run_tcping(host, port):
             timeout=TcpingCount * 3
         ).decode(errors="ignore")
 
-        # probes / successful / failed
         stat_match = re.search(
             r"(\d+)\s+probes sent\.\s+(\d+)\s+successful,\s+(\d+)\s+failed\.",
             out,
@@ -113,7 +132,6 @@ def run_tcping(host, port):
         if probes == 0 or success == 0:
             return "Timeout", "100%"
 
-        # 平均延迟
         avg_match = re.search(r"Average\s*=\s*([\d\.]+)ms", out)
         avg = avg_match.group(1) if avg_match else "Timeout"
 
@@ -122,7 +140,7 @@ def run_tcping(host, port):
 
     except Exception:
         return "Timeout", "100%"
-		
+
 # ======================
 # Worker
 # ======================
@@ -150,14 +168,17 @@ def worker(idx, host, port):
 results = [None] * len(targets)
 
 with ThreadPoolExecutor(max_workers=Threads) as pool:
-    futures = [pool.submit(worker, i, h, p) for i, (h, p) in enumerate(targets)]
+    futures = [
+        pool.submit(worker, i, h, p)
+        for i, (h, p) in enumerate(targets)
+    ]
     for f in as_completed(futures):
         idx, line = f.result()
         results[idx] = line
         print(line)
 
 # ======================
-# 写文件
+# 写结果
 # ======================
 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 outfile = f"result_{ts}.txt"
