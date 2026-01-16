@@ -2,15 +2,17 @@
 import subprocess
 import sys
 import os
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import re
 import configparser
+import threading
 
+# ==================================================
+# Banner
+# ==================================================
 def show_banner():
     os.system("cls" if os.name == "nt" else "clear")
-
     banner = r"""
 ========================================
           _   _      _       ____        
@@ -27,20 +29,41 @@ def show_banner():
 """
     print(banner)
 
-
-# ===== 程序入口 =====
 if __name__ == "__main__":
     show_banner()
-	
+
 # ==================================================
-# 关键：统一工作目录（兼容 PyInstaller exe）
+# 工作目录（兼容 exe）
 # ==================================================
-if getattr(sys, 'frozen', False):
+if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 os.chdir(BASE_DIR)
+
+# ==================================================
+# 日志系统（只写文件，默认不 print）
+# ==================================================
+LOG_FILE = os.path.join(
+    BASE_DIR,
+    f"NetPulse_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+)
+LOG_LOCK = threading.Lock()
+
+def log(msg, echo=False):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+
+    if echo:
+        print(line)
+
+    with LOG_LOCK:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+log("NetPulse 启动")
+log(f"BASE_DIR = {BASE_DIR}")
 
 # ==================================================
 # 读取 config.ini
@@ -54,13 +77,15 @@ DefaultTCPPort = config.getint("GENERAL", "DefaultTCPPort", fallback=443)
 Threads = config.getint("GENERAL", "Threads", fallback=5)
 InputFile = config.get("GENERAL", "InputFile", fallback="iplist.txt")
 
-print("=== NetPulse 配置加载成功 ===")
+print("\n=== NetPulse 配置加载成功 ===")
 print(f"PingCount      = {PingCount}")
 print(f"TcpingCount    = {TcpingCount}")
 print(f"DefaultTCPPort = {DefaultTCPPort}")
 print(f"Threads        = {Threads}")
 print(f"InputFile      = {InputFile}")
 print("=============================\n")
+
+log(f"PingCount={PingCount}, TcpingCount={TcpingCount}, Threads={Threads}")
 
 # ==================================================
 # 模式选择
@@ -73,6 +98,8 @@ mode = input("请选择测试模式：").strip()
 if mode not in {"1", "2", "3"}:
     print("无效选择")
     sys.exit(1)
+
+log(f"选择模式 = {mode}")
 
 # ==================================================
 # 读取目标列表
@@ -102,8 +129,10 @@ with open(os.path.join(BASE_DIR, InputFile), "r", encoding="utf-8") as f:
 
         targets.append((host, port))
 
+log(f"加载目标数量：{len(targets)}")
+
 # ==================================================
-# ICMP
+# ICMP Ping
 # ==================================================
 def run_ping(host):
     try:
@@ -111,6 +140,11 @@ def run_ping(host):
         out = subprocess.check_output(
             cmd, stderr=subprocess.STDOUT, timeout=PingCount * 3
         ).decode("gbk", errors="ignore")
+
+        log(f"PING {host} 原始输出开始")
+        for l in out.splitlines():
+            log(l)
+        log(f"PING {host} 原始输出结束")
 
         loss_match = re.search(r"\((\d+)%\s*丢失\)", out)
         if not loss_match:
@@ -123,7 +157,8 @@ def run_ping(host):
 
         return avg, loss
 
-    except Exception:
+    except Exception as e:
+        log(f"PING 异常 {host}: {e}")
         return "Timeout", "100%"
 
 # ==================================================
@@ -132,18 +167,33 @@ def run_ping(host):
 def run_tcping(host, port):
     exe = os.path.join(BASE_DIR, "tcping.exe")
     if not os.path.exists(exe):
+        log("tcping.exe 未找到")
         return "Timeout", "100%"
 
+    cmd = [exe, "-n", str(TcpingCount), host, str(port)]
+    log(f"TCPING 执行：{' '.join(cmd)}")
+
     times = []
+    loss = "100%"
 
     try:
-        out = subprocess.check_output(
-            [exe, "-n", str(TcpingCount), host, str(port)],
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=TcpingCount * 3
-        ).decode(errors="ignore")
+            timeout=TcpingCount * 3,
+            text=True,
+            encoding="utf-8",
+            errors="ignore"
+        )
 
-        # 1️⃣ 解析 time= 用于算平均延迟
+        out = proc.stdout
+
+        log(f"TCPING {host}:{port} 原始输出开始")
+        for line in out.splitlines():
+            log(line)
+        log(f"TCPING {host}:{port} 原始输出结束")
+
         for line in out.splitlines():
             if "time=" in line.lower():
                 try:
@@ -157,15 +207,12 @@ def run_tcping(host, port):
                 except:
                     pass
 
-        # 2️⃣ 解析 tcping summary 里的 fail%
         fail_match = re.search(r"\(([\d\.]+)%\s*fail\)", out, re.IGNORECASE)
         if fail_match:
             loss = f"{fail_match.group(1)}%"
-        else:
-            # summary 没抓到，按全失败处理
-            loss = "100%"
 
-    except Exception:
+    except Exception as e:
+        log(f"TCPING 异常 {host}:{port}: {e}")
         return "Timeout", "100%"
 
     if not times:
@@ -178,21 +225,25 @@ def run_tcping(host, port):
 # Worker
 # ==================================================
 def worker(idx, host, port):
+    log(f"任务开始 [{idx}] {host} port={port}")
+
     if mode == "1":
         avg, loss = run_ping(host)
-        return idx, f"{host},ICMP,{avg},{loss}"
-
-    if mode == "2":
+        result = f"{host},ICMP,{avg},{loss}"
+    elif mode == "2":
         p = port if port else DefaultTCPPort
         avg, loss = run_tcping(host, p)
-        return idx, f"{host},TCP:{p},{avg},{loss}"
-
-    if port:
-        avg, loss = run_tcping(host, port)
-        return idx, f"{host},TCP:{port},{avg},{loss}"
+        result = f"{host},TCP:{p},{avg},{loss}"
     else:
-        avg, loss = run_ping(host)
-        return idx, f"{host},ICMP,{avg},{loss}"
+        if port:
+            avg, loss = run_tcping(host, port)
+            result = f"{host},TCP:{port},{avg},{loss}"
+        else:
+            avg, loss = run_ping(host)
+            result = f"{host},ICMP,{avg},{loss}"
+
+    log(f"任务完成 [{idx}] {result}")
+    return idx, result
 
 # ==================================================
 # 并发执行
@@ -204,10 +255,10 @@ with ThreadPoolExecutor(max_workers=Threads) as pool:
     for f in as_completed(futures):
         idx, line = f.result()
         results[idx] = line
-        print(line)
+        print(line)   # ✅ 只在这里输出 result
 
 # ==================================================
-# 写结果
+# 写 result 文件（保持你原来的逻辑）
 # ==================================================
 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 outfile = os.path.join(BASE_DIR, f"result_{ts}.txt")
@@ -216,6 +267,7 @@ with open(outfile, "w", encoding="utf-8") as f:
     f.write("\n".join(results))
 
 print(f"\n✅ 测试完成，结果已保存到：{outfile}")
+print(f"📄 详细日志：{LOG_FILE}")
 
 def wait_before_exit():
     if getattr(sys, "frozen", False):
