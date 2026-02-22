@@ -8,6 +8,7 @@ from datetime import datetime
 import re
 import configparser
 import threading
+from croniter import croniter
 
 # ==================================================
 # Banner
@@ -44,7 +45,7 @@ else:
 os.chdir(BASE_DIR)
 
 # ==================================================
-# 日志系统（只写文件，默认不 print）
+# 日志系统
 # ==================================================
 LOG_FILE = os.path.join(
     BASE_DIR,
@@ -78,18 +79,27 @@ DefaultTCPPort = config.getint("GENERAL", "DefaultTCPPort", fallback=443)
 Threads = config.getint("GENERAL", "Threads", fallback=5)
 InputFile = config.get("GENERAL", "InputFile", fallback="iplist.txt")
 
+# Cron
+CronExpr = None
+if config.has_section("CRON"):
+    CronExpr = config.get("CRON", "Timing", fallback=None)
+
 print("\n=== NetPulse 配置加载成功 ===")
 print(f"PingCount      = {PingCount}")
 print(f"TcpingCount    = {TcpingCount}")
 print(f"DefaultTCPPort = {DefaultTCPPort}")
 print(f"Threads        = {Threads}")
 print(f"InputFile      = {InputFile}")
+if CronExpr:
+    print(f"Cron           = {CronExpr}")
 print("=============================\n")
 
-log(f"PingCount={PingCount}, TcpingCount={TcpingCount}, Threads={Threads}")
+log(f"配置: Ping={PingCount} TCP={TcpingCount} Threads={Threads}")
+if CronExpr:
+    log(f"Cron 表达式: {CronExpr}")
 
 # ==================================================
-# 显示当前出口 IP（新增）
+# 出口 IP 显示
 # ==================================================
 def show_myip_info():
     try:
@@ -105,17 +115,11 @@ def show_myip_info():
         info = proc.stdout.strip()
         if info:
             print("🌐 当前出口 IP 信息：")
-            print(info)
-            print()
-            log(f"出口 IP 信息：{info}")
-        else:
-            print("🌐 当前出口 IP 信息：获取失败\n")
-            log("出口 IP 信息获取失败（无输出）")
+            print(info + "\n")
+            log(f"出口 IP: {info}")
     except Exception as e:
-        print("🌐 当前出口 IP 信息：获取失败\n")
-        log(f"出口 IP 信息获取异常：{e}")
+        log(f"获取出口 IP 失败: {e}")
 
-# 👇 放在「配置下方 / 模式选择上方」
 show_myip_info()
 
 # ==================================================
@@ -123,17 +127,17 @@ show_myip_info()
 # ==================================================
 print("[1] ICMP（普通 ping）")
 print("[2] TCP（tcping）")
-print("[3] 混合模式（无端口 ping，有端口 tcping）")
+print("[3] 混合模式")
 
 mode = input("请选择测试模式：").strip()
 if mode not in {"1", "2", "3"}:
     print("无效选择")
     sys.exit(1)
 
-log(f"选择模式 = {mode}")
+log(f"选择模式: {mode}")
 
 # ==================================================
-# 读取目标列表
+# 读取目标
 # ==================================================
 targets = []
 
@@ -160,10 +164,10 @@ with open(os.path.join(BASE_DIR, InputFile), "r", encoding="utf-8") as f:
 
         targets.append((host, port))
 
-log(f"加载目标数量：{len(targets)}")
+log(f"加载目标数量: {len(targets)}")
 
 # ==================================================
-# ICMP Ping
+# ICMP
 # ==================================================
 def run_ping(host):
     try:
@@ -172,18 +176,10 @@ def run_ping(host):
             cmd, stderr=subprocess.STDOUT, timeout=PingCount * 3
         ).decode("gbk", errors="ignore")
 
-        log(f"PING {host} 原始输出开始")
-        for l in out.splitlines():
-            log(l)
-        log(f"PING {host} 原始输出结束")
-
         loss_match = re.search(r"\((\d+)%\s*丢失\)", out)
-        if not loss_match:
-            return "Timeout", "100%"
-
-        loss = f"{loss_match.group(1)}%"
-
         avg_match = re.search(r"平均\s*=\s*(\d+)ms", out)
+
+        loss = f"{loss_match.group(1)}%" if loss_match else "100%"
         avg = avg_match.group(1) if avg_match else "Timeout"
 
         return avg, loss
@@ -198,11 +194,9 @@ def run_ping(host):
 def run_tcping(host, port):
     exe = os.path.join(BASE_DIR, "tcping.exe")
     if not os.path.exists(exe):
-        log("tcping.exe 未找到")
         return "Timeout", "100%"
 
     cmd = [exe, "-n", str(TcpingCount), host, str(port)]
-    log(f"TCPING 执行：{' '.join(cmd)}")
 
     times = []
     loss = "100%"
@@ -220,19 +214,11 @@ def run_tcping(host, port):
 
         out = proc.stdout
 
-        log(f"TCPING {host}:{port} 原始输出开始")
-        for line in out.splitlines():
-            log(line)
-        log(f"TCPING {host}:{port} 原始输出结束")
-
         for line in out.splitlines():
             if "time=" in line.lower():
                 try:
                     ms = float(
-                        line.lower()
-                        .split("time=")[1]
-                        .replace("ms", "")
-                        .strip()
+                        line.lower().split("time=")[1].replace("ms", "").strip()
                     )
                     times.append(ms)
                 except:
@@ -256,8 +242,6 @@ def run_tcping(host, port):
 # Worker
 # ==================================================
 def worker(idx, host, port):
-    log(f"任务开始 [{idx}] {host} port={port}")
-
     if mode == "1":
         avg, loss = run_ping(host)
         result = f"{host},ICMP,{avg},{loss}"
@@ -273,35 +257,66 @@ def worker(idx, host, port):
             avg, loss = run_ping(host)
             result = f"{host},ICMP,{avg},{loss}"
 
-    log(f"任务完成 [{idx}] {result}")
     return idx, result
 
 # ==================================================
-# 并发执行
+# 单次执行
 # ==================================================
-results = [None] * len(targets)
+def run_once():
 
-with ThreadPoolExecutor(max_workers=Threads) as pool:
-    futures = [pool.submit(worker, i, h, p) for i, (h, p) in enumerate(targets)]
-    for f in as_completed(futures):
-        idx, line = f.result()
-        results[idx] = line
-        print(line)
+    print("\n===== NetPulse 执行开始 =====\n")
+    log("执行开始")
+
+    results = [None] * len(targets)
+
+    with ThreadPoolExecutor(max_workers=Threads) as pool:
+        futures = [pool.submit(worker, i, h, p) for i, (h, p) in enumerate(targets)]
+        for f in as_completed(futures):
+            idx, line = f.result()
+            results[idx] = line
+            print(line)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    outfile = os.path.join(BASE_DIR, f"result_{ts}.txt")
+
+    with open(outfile, "w", encoding="utf-8") as f:
+        f.write("\n".join(results))
+
+    print(f"\n✅ 完成 → {outfile}")
+    log(f"输出文件: {outfile}")
 
 # ==================================================
-# 写 result 文件（保持原逻辑）
+# 调度逻辑
 # ==================================================
-ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-outfile = os.path.join(BASE_DIR, f"result_{ts}.txt")
+if not CronExpr:
+    run_once()
 
-with open(outfile, "w", encoding="utf-8") as f:
-    f.write("\n".join(results))
+else:
+    cron = croniter(CronExpr, datetime.now())
+    print("\n进入 Cron 循环模式 (Ctrl+C 退出)\n")
 
-print(f"\n✅ 测试完成，结果已保存到：{outfile}")
-print(f"📄 详细日志：{LOG_FILE}")
+    try:
+        while True:
+            next_run = cron.get_next(datetime)
+            wait = (next_run - datetime.now()).total_seconds()
 
+            print(f"下一次执行时间 → {next_run}")
+            log(f"下一次执行: {next_run}")
+
+            if wait > 0:
+                time.sleep(wait)
+
+            run_once()
+
+    except KeyboardInterrupt:
+        print("\nCron 已停止")
+        log("Cron 停止")
+
+# ==================================================
+# 退出等待（exe）
+# ==================================================
 def wait_before_exit():
     if getattr(sys, "frozen", False):
-        input("\n按回车键退出...")
+        input("\n按回车退出...")
 
 wait_before_exit()
