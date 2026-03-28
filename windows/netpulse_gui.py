@@ -196,8 +196,15 @@ def load_targets(filepath):
 def run_ping(host, count, timeout_mult=3):
     try:
         cmd = ["ping", "-n", str(count), host]
+        # Windows: 隐藏命令行窗口
+        startupinfo = None
+        if sys.platform == "win32":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
         out = subprocess.check_output(
-            cmd, stderr=subprocess.STDOUT, timeout=count * timeout_mult
+            cmd, stderr=subprocess.STDOUT, timeout=count * timeout_mult,
+            startupinfo=startupinfo
         ).decode("gbk", errors="ignore")
         loss_match = re.search(r"\((\d+)%\s*丢失\)", out)
         avg_match  = re.search(r"平均\s*=\s*(\d+)ms", out)
@@ -215,9 +222,16 @@ def run_tcping(host, port, count, base_dir, timeout_mult=3):
     cmd = [exe, "-n", str(count), host, str(port)]
     times, loss = [], "100%"
     try:
+        # Windows: 隐藏命令行窗口
+        startupinfo = None
+        if sys.platform == "win32":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
         proc = subprocess.run(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=count * timeout_mult, text=True, encoding="utf-8", errors="ignore"
+            timeout=count * timeout_mult, text=True, encoding="utf-8", errors="ignore",
+            startupinfo=startupinfo
         )
         out = proc.stdout
         for line in out.splitlines():
@@ -603,11 +617,71 @@ class App(ctk.CTk):
         self.result_q   = queue.Queue()
         self.targets    = []
         self._theme_name = CURRENT_THEME
+        self._myip_info = None  # 保存获取到的 IP 信息
 
         self._apply_ctk_theme()
         self._build_ui()
         self._reload_all()
         self.after(100, self._poll_queue)
+        self._fetch_myip()  # 启动时获取出口 IP
+
+    # ── 获取出口 IP ─────────────────────────────────────────
+    def _fetch_myip(self):
+        """异步获取出口 IP 信息"""
+        # 确保 _ip_lbl 已创建
+        if not hasattr(self, "_ip_lbl") or self._ip_lbl is None:
+            return
+        
+        # 重置为获取中状态
+        self._ip_lbl.configure(text="🌐 获取中...")
+        
+        def fetch():
+            try:
+                # Windows: 隐藏命令行窗口
+                startupinfo = None
+                if sys.platform == "win32":
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = subprocess.SW_HIDE
+                
+                proc = subprocess.run(
+                    ["curl", "myip.ipip.net"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=5,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                    startupinfo=startupinfo
+                )
+                info = proc.stdout.strip()
+                if info:
+                    # 简化显示，只取 IP 和地理位置
+                    parts = info.split()
+                    if len(parts) >= 2:
+                        ip = parts[0]
+                        location = " ".join(parts[1:]) if len(parts) > 1 else ""
+                        return f"🌐 {ip} {location[:30]}"
+                    return f"🌐 {info[:50]}"
+            except Exception as e:
+                print(f"[NetPulse] 获取 IP 失败: {e}")
+                return None
+        
+        def update():
+            result = fetch()
+            # 使用 after 确保在主线程更新 UI
+            self.after(0, lambda: self._update_ip_label(result))
+        
+        threading.Thread(target=update, daemon=True).start()
+    
+    def _update_ip_label(self, result):
+        """在主线程更新 IP 标签"""
+        if hasattr(self, "_ip_lbl") and self._ip_lbl is not None:
+            if result:
+                self._myip_info = result
+                self._ip_lbl.configure(text=result)
+            else:
+                self._ip_lbl.configure(text="")
 
     # ── 主题 ────────────────────────────────────────────────
     def _apply_ctk_theme(self):
@@ -626,6 +700,7 @@ class App(ctk.CTk):
         self.configure(fg_color=C("bg_dark"))
         self._build_ui()
         self._reload_all()
+        self._fetch_myip()  # 换主题后重新获取 IP
 
     # ── UI 总入口 ────────────────────────────────────────────
     def _build_ui(self):
@@ -667,6 +742,14 @@ class App(ctk.CTk):
             bar, text="Multi-Ping Tool  ·  GUI Edition",
             font=ctk.CTkFont(size=12), text_color=C("text_secondary")
         ).pack(side="left", padx=4)
+
+        # ── 出口 IP 显示（中间）──────────────────
+        self._ip_lbl = ctk.CTkLabel(
+            bar, text="🌐 获取中...",
+            font=ctk.CTkFont(size=11),
+            text_color=C("text_secondary")
+        )
+        self._ip_lbl.pack(side="left", padx=(20, 0))
 
         # ── 皮肤选择（右侧）──────────────────────
         right_bar = ctk.CTkFrame(bar, fg_color="transparent")
