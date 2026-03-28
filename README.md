@@ -115,7 +115,7 @@ python netpulse_gui.py
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed --name NetPulseGUI netpulse_gui.py
+python -m PyInstaller --onefile --windowed --name NetPulseGUI --version-file=version.txt netpulse_gui.py
 ```
 
 ---
