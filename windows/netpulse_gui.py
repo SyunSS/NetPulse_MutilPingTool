@@ -3,7 +3,8 @@
 """
 NetPulse GUI - Windows Edition
 Author: Based on SyunSS/NetPulse_MutilPingTool
-GUI Edition: v2 (Cron Wizard + Multi-Theme)
+GUI Edition: v2.1 (Cron Wizard + Multi-Theme + Scrollable Layout)
+Version: 2.1.0
 
 依赖安装：
     pip install customtkinter croniter
@@ -22,6 +23,11 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
+
+# 版本号 - 修改这里即可同步更新到窗口标题和打包信息
+APP_NAME = "NetPulse"
+APP_VERSION = "1.0"
+APP_FULL_NAME = f"{APP_NAME} Multi-Ping Tool GUI v{APP_VERSION}"
 
 THEMES = {
     "暗夜极客": {
@@ -591,7 +597,7 @@ class App(ctk.CTk):
         super().__init__()
         global CURRENT_THEME
 
-        self.title("NetPulse  ·  Multi-Ping Tool")
+        self.title(f"{APP_NAME}  ·  Multi-Ping Tool  v{APP_VERSION}")
         self.geometry("1120x760")
         self.minsize(900, 600)
 
@@ -664,7 +670,7 @@ class App(ctk.CTk):
         ).pack(side="left", padx=20)
 
         ctk.CTkLabel(
-            bar, text="Multi-Ping Tool  ·  GUI Edition",
+            bar, text=f"Multi-Ping Tool  ·  GUI Edition  v{APP_VERSION}",
             font=ctk.CTkFont(size=12), text_color=C("text_secondary")
         ).pack(side="left", padx=4)
 
@@ -1295,10 +1301,23 @@ class App(ctk.CTk):
 # 入口
 # ============================================================
 def main():
+    # 处理命令行参数
+    if "--version" in sys.argv or "-v" in sys.argv:
+        print(f"{APP_NAME} GUI v{APP_VERSION}")
+        sys.exit(0)
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print(f"{APP_NAME} GUI v{APP_VERSION}")
+        print(f"Usage: python {os.path.basename(__file__)} [options]")
+        print("")
+        print("Options:")
+        print("  -h, --help     显示帮助信息")
+        print("  -v, --version  显示版本号")
+        sys.exit(0)
+
     try:
         import customtkinter  # noqa
     except ImportError:
-        print("[NetPulse GUI] 缺少依赖，请运行：pip install customtkinter croniter")
+        print(f"[{APP_NAME} GUI] 缺少依赖，请运行：pip install customtkinter croniter")
         sys.exit(1)
     app = App()
     app.mainloop()
