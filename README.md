@@ -72,8 +72,10 @@ NetPulseGUI.exe
 ```bash
 cd windows
 pip install customtkinter croniter
-python netpulse_gui.py
+pythonw netpulse_gui.py
 ```
+
+> 💡 使用 `pythonw` 运行可无控制台窗口；如需调试可用 `python`
 
 #### GUI 功能概览
 
@@ -115,8 +117,10 @@ python netpulse_gui.py
 
 ```bash
 pip install pyinstaller
-python -m PyInstaller --onefile --windowed --name NetPulseGUI netpulse_gui.py
+python -m PyInstaller --onefile --noconsole --windowed --name NetPulseGUI netpulse_gui.py
 ```
+
+
 
 ---
 
