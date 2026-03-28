@@ -23,6 +23,10 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
+# 用于强制终止子进程
+_active_processes = set()
+_process_lock = threading.Lock()
+
 THEMES = {
     "暗夜极客": {
         "mode": "dark",
@@ -215,6 +219,66 @@ def run_ping(host, count, timeout_mult=3):
         return "Timeout", "100%"
 
 
+def run_ping_with_progress(host, count, progress_callback=None, timeout_mult=3, stop_event=None):
+    """带进度回调的 ping 函数"""
+    proc = None
+    try:
+        cmd = ["ping", "-n", str(count), host]
+        startupinfo = None
+        if sys.platform == "win32":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+        
+        # 使用 Popen 实时获取输出
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            startupinfo=startupinfo
+        )
+        
+        # 注册到全局进程集合
+        with _process_lock:
+            _active_processes.add(proc)
+        
+        out_lines = []
+        reply_count = 0
+        
+        for line in iter(proc.stdout.readline, b''):
+            # 检查是否需要停止
+            if stop_event and stop_event.is_set():
+                proc.terminate()
+                break
+            
+            line_str = line.decode("gbk", errors="ignore")
+            out_lines.append(line_str)
+            
+            # 检测回复包
+            if "来自" in line_str or "Reply from" in line_str:
+                reply_count += 1
+                if progress_callback:
+                    progress_callback(reply_count, count)
+        
+        proc.wait(timeout=count * timeout_mult)
+        out = "".join(out_lines)
+        
+        loss_match = re.search(r"\((\d+)%\s*丢失\)", out)
+        avg_match  = re.search(r"平均\s*=\s*(\d+)ms", out)
+        loss = f"{loss_match.group(1)}%" if loss_match else "100%"
+        avg  = avg_match.group(1) if avg_match else "Timeout"
+        return avg, loss
+    except Exception:
+        return "Timeout", "100%"
+    finally:
+        if proc:
+            with _process_lock:
+                _active_processes.discard(proc)
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+            except:
+                pass
+
+
 def run_tcping(host, port, count, base_dir, timeout_mult=3):
     exe = os.path.join(base_dir, "tcping.exe")
     if not os.path.exists(exe):
@@ -254,6 +318,78 @@ def run_tcping(host, port, count, base_dir, timeout_mult=3):
     return str(int(sum(times) / len(times))), loss
 
 
+def run_tcping_with_progress(host, port, count, base_dir, progress_callback=None, timeout_mult=3, stop_event=None):
+    """带进度回调的 tcping 函数"""
+    exe = os.path.join(base_dir, "tcping.exe")
+    if not os.path.exists(exe):
+        return "N/A(no tcping.exe)", "N/A"
+    cmd = [exe, "-n", str(count), host, str(port)]
+    times, loss = [], "100%"
+    proc = None
+    try:
+        startupinfo = None
+        if sys.platform == "win32":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+        
+        # 使用 Popen 实时获取输出
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            startupinfo=startupinfo, text=True, encoding="utf-8", errors="ignore"
+        )
+        
+        # 注册到全局进程集合
+        with _process_lock:
+            _active_processes.add(proc)
+        
+        out_lines = []
+        reply_count = 0
+        
+        for line in iter(proc.stdout.readline, ''):
+            # 检查是否需要停止
+            if stop_event and stop_event.is_set():
+                proc.terminate()
+                break
+            
+            out_lines.append(line)
+            
+            # 检测回复包
+            if "time=" in line.lower():
+                reply_count += 1
+                if progress_callback:
+                    progress_callback(reply_count, count)
+                try:
+                    ms = float(
+                        line.lower().split("time=")[1]
+                        .replace("ms", "").strip().split()[0]
+                    )
+                    times.append(ms)
+                except Exception:
+                    pass
+        
+        proc.wait(timeout=count * timeout_mult)
+        out = "".join(out_lines)
+        
+        fail_m = re.search(r"\(([\d\.]+)%\s*fail\)", out, re.IGNORECASE)
+        if fail_m:
+            loss = f"{fail_m.group(1)}%"
+    except Exception:
+        return "Timeout", "100%"
+    finally:
+        if proc:
+            with _process_lock:
+                _active_processes.discard(proc)
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+            except:
+                pass
+    if not times:
+        return "Timeout", loss
+    return str(int(sum(times) / len(times))), loss
+
+
 def worker_func(idx, host, port, mode, cfg, base_dir):
     ping_count   = cfg.getint("GENERAL", "PingCount",      fallback=4)
     tcp_count    = cfg.getint("GENERAL", "TcpingCount",    fallback=4)
@@ -271,6 +407,30 @@ def worker_func(idx, host, port, mode, cfg, base_dir):
             proto = f"TCP:{port}"
         else:
             avg, loss = run_ping(host, ping_count)
+            proto = "ICMP"
+    return idx, host, proto, avg, loss
+
+
+def worker_func_with_progress(idx, host, port, mode, cfg, base_dir, result_q, ping_count, tcp_count, stop_event):
+    """带进度回调的 worker 函数"""
+    default_port = cfg.getint("GENERAL", "DefaultTCPPort", fallback=443)
+    
+    def progress_callback(current, total):
+        result_q.put(("update_active", host, current, total))
+    
+    if mode == "1":
+        avg, loss = run_ping_with_progress(host, ping_count, progress_callback, stop_event=stop_event)
+        proto = "ICMP"
+    elif mode == "2":
+        p = port if port else default_port
+        avg, loss = run_tcping_with_progress(host, p, tcp_count, base_dir, progress_callback, stop_event=stop_event)
+        proto = f"TCP:{p}"
+    else:
+        if port:
+            avg, loss = run_tcping_with_progress(host, port, tcp_count, base_dir, progress_callback, stop_event=stop_event)
+            proto = f"TCP:{port}"
+        else:
+            avg, loss = run_ping_with_progress(host, ping_count, progress_callback, stop_event=stop_event)
             proto = "ICMP"
     return idx, host, proto, avg, loss
 
@@ -958,7 +1118,7 @@ class App(ctk.CTk):
     # ── 右侧面板 ─────────────────────────────────────────────
     def _build_right(self, parent):
         parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(1, weight=1)
+        parent.rowconfigure(2, weight=1)
 
         # 控制按钮行
         ctrl = ctk.CTkFrame(parent, fg_color="transparent")
@@ -998,12 +1158,52 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=13), corner_radius=8
         ).grid(row=0, column=3, padx=(8,0))
 
+        # 正在测试列表（实时进度）- 使用可滚动容器
+        self._active_frame = ctk.CTkFrame(
+            parent, fg_color=C("bg_card"),
+            corner_radius=10, border_width=1, border_color=C("border")
+        )
+        self._active_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        self._active_frame.grid_remove()  # 默认隐藏
+        self._active_frame.columnconfigure(0, weight=1)
+        
+        active_hdr = ctk.CTkFrame(self._active_frame, fg_color=C("bg_input"),
+                                  corner_radius=0, height=32)
+        active_hdr.grid(row=0, column=0, sticky="ew")
+        active_hdr.grid_propagate(False)
+        ctk.CTkLabel(active_hdr, text="🔄 正在测试",
+                     font=ctk.CTkFont(size=11, weight="bold"),
+                     text_color=C("accent")
+                     ).pack(side="left", padx=12)
+        
+        # 使用可滚动框架，最大高度限制
+        self._active_scroll = ctk.CTkScrollableFrame(
+            self._active_frame,
+            fg_color="transparent",
+            scrollbar_button_color=C("border"),
+            scrollbar_button_hover_color=C("accent"),
+            height=120,  # 最大显示高度
+        )
+        self._active_scroll.grid(row=1, column=0, sticky="ew", padx=8, pady=8)
+        
+        # 使用网格布局支持多列
+        self._active_container = ctk.CTkFrame(
+            self._active_scroll, fg_color="transparent"
+        )
+        self._active_container.pack(fill="both", expand=True)
+        
+        self._active_widgets = {}  # host -> (frame, label, progress)
+        self._active_cols = 2  # 默认列数
+        
+        # 绑定窗口大小变化事件，动态调整列数
+        self.bind("<Configure>", self._on_window_resize)
+
         # 输出区域
         out_frame = ctk.CTkFrame(
             parent, fg_color=C("bg_card"),
             corner_radius=10, border_width=1, border_color=C("border")
         )
-        out_frame.grid(row=1, column=0, sticky="nsew")
+        out_frame.grid(row=2, column=0, sticky="nsew")
         out_frame.columnconfigure(0, weight=1)
         out_frame.rowconfigure(1, weight=1)
 
@@ -1036,7 +1236,7 @@ class App(ctk.CTk):
             parent, height=6, corner_radius=3,
             fg_color=C("bg_card"), progress_color=C("accent")
         )
-        self._progress.grid(row=2, column=0, sticky="ew", pady=(6,0))
+        self._progress.grid(row=3, column=0, sticky="ew", pady=(6,0))
         self._progress.set(0)
 
         # 统计栏
@@ -1178,11 +1378,36 @@ class App(ctk.CTk):
 
     def _stop_test(self):
         self.stop_flag.set()
+        self._kill_all_processes()  # 强制终止所有子进程
         self.running = False
         self._run_btn.configure(state="normal")
         self._stop_btn.configure(state="disabled")
         self._cron_status.configure(text="● 已停止", text_color=C("danger"))
         self._set_status("已停止")
+        self._clear_active_targets()  # 清空正在测试列表
+    
+    def _kill_all_processes(self):
+        """强制终止所有活动的子进程"""
+        with _process_lock:
+            procs = list(_active_processes)
+        for proc in procs:
+            try:
+                if proc.poll() is None:  # 进程还在运行
+                    proc.terminate()  # 先尝试正常终止
+                    # 等待一小会儿，如果还没终止就强制 kill
+                    try:
+                        proc.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        if sys.platform == "win32":
+                            # Windows 强制终止
+                            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], 
+                                         capture_output=True)
+                        else:
+                            proc.kill()
+            except Exception:
+                pass
+        with _process_lock:
+            _active_processes.clear()
 
     def _cron_loop(self, expr):
         try:
@@ -1216,24 +1441,37 @@ class App(ctk.CTk):
         cfg     = self.cfg
         bd      = self.base_dir.get()
         threads = cfg.getint("GENERAL", "Threads", fallback=5)
+        ping_count = cfg.getint("GENERAL", "PingCount", fallback=4)
+        tcp_count = cfg.getint("GENERAL", "TcpingCount", fallback=4)
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.result_q.put(("log",
             f"\n{'='*50}\n⚡ NetPulse 执行开始  [{ts}]\n{'='*50}\n", "accent"))
         self.result_q.put(("set_status", f"测试中... 共 {len(targets)} 个目标"))
         self.result_q.put(("reset_stats",))
+        self.result_q.put(("clear_active",))
 
         results = [None] * len(targets)
         completed = 0
         stat = {"ok": 0, "slow": 0, "fail": 0}
+        
+        # 添加所有目标到正在测试列表
+        for h, p in targets:
+            self.result_q.put(("add_active", h, p, mode))
 
         with ThreadPoolExecutor(max_workers=threads) as pool:
             futures = {
-                pool.submit(worker_func, i, h, p, mode, cfg, bd): i
+                pool.submit(worker_func_with_progress, i, h, p, mode, cfg, bd, 
+                           self.result_q, ping_count, tcp_count, self.stop_flag): i
                 for i, (h, p) in enumerate(targets)
             }
             for f in as_completed(futures):
                 if self.stop_flag.is_set():
+                    # 强制终止所有子进程
+                    self._kill_all_processes()
+                    # 取消剩余任务
+                    for future in futures:
+                        future.cancel()
                     break
                 try:
                     idx, host, proto, avg, loss = f.result()
@@ -1256,6 +1494,7 @@ class App(ctk.CTk):
                     self.result_q.put(("progress", completed / len(targets)))
                     self.result_q.put(("stats", completed,
                                        stat["ok"], stat["slow"], stat["fail"]))
+                    self.result_q.put(("remove_active", host))
                 except Exception as e:
                     self.result_q.put(("log", f"  ⚠️  任务异常: {e}\n", "warning"))
 
@@ -1293,12 +1532,24 @@ class App(ctk.CTk):
                     self._set_status(item[1])
                 elif cmd == "reset_stats":
                     self._reset_stats()
+                elif cmd == "clear_active":
+                    self._clear_active_targets()
+                elif cmd == "add_active":
+                    _, host, port, mode = item
+                    self._add_active_target(host, port, mode)
+                elif cmd == "update_active":
+                    _, host, current, total = item
+                    self._update_active_progress(host, current, total)
+                elif cmd == "remove_active":
+                    _, host = item
+                    self._remove_active_target(host)
                 elif cmd == "done":
                     self.running = False
                     self._run_btn.configure(state="normal")
                     self._stop_btn.configure(state="disabled")
                     self._set_status("测试完成")
                     self._progress.set(1)
+                    self._clear_active_targets()
                     if not self._cron_var.get().strip():
                         self._cron_status.configure(
                             text="● 单次完成", text_color=C("success"))
@@ -1323,6 +1574,109 @@ class App(ctk.CTk):
         inner.insert("end", text, tag)
         inner.see("end")
         self._output.configure(state="disabled")
+
+    # ── 窗口大小变化处理 ─────────────────────────────────────
+    def _on_window_resize(self, event=None):
+        """根据窗口宽度动态调整列数"""
+        if not hasattr(self, '_active_container'):
+            return
+        
+        width = self.winfo_width()
+        # 根据窗口宽度决定列数
+        if width < 1000:
+            new_cols = 1
+        elif width < 1400:
+            new_cols = 2
+        else:
+            new_cols = 3
+        
+        if new_cols != self._active_cols:
+            self._active_cols = new_cols
+            self._relayout_active_targets()
+    
+    def _relayout_active_targets(self):
+        """重新布局所有正在测试的目标"""
+        # 清除现有布局
+        for widget in self._active_container.winfo_children():
+            widget.grid_forget()
+        
+        # 重新布局
+        for idx, (host, (frame, lbl, progress_lbl)) in enumerate(self._active_widgets.items()):
+            row = idx // self._active_cols
+            col = idx % self._active_cols
+            frame.grid(row=row, column=col, sticky="ew", padx=4, pady=2)
+        
+        # 配置列权重
+        for c in range(self._active_cols):
+            self._active_container.columnconfigure(c, weight=1)
+
+    # ── 正在测试列表管理 ─────────────────────────────────────
+    def _add_active_target(self, host, port, mode):
+        """添加一个正在测试的目标到列表"""
+        if host in self._active_widgets:
+            return
+        
+        # 显示容器
+        self._active_frame.grid()
+        
+        # 创建进度项
+        frame = ctk.CTkFrame(self._active_container, fg_color=C("bg_input"), corner_radius=6)
+        
+        # 目标信息
+        proto = "ICMP" if mode == "1" else (f"TCP:{port}" if port else "TCP")
+        info_text = f"{host} ({proto})"
+        lbl = ctk.CTkLabel(
+            frame, text=info_text,
+            font=ctk.CTkFont(size=11),
+            text_color=C("text_primary")
+        )
+        lbl.pack(side="left", padx=(10, 5))
+        
+        # 进度标签
+        progress_lbl = ctk.CTkLabel(
+            frame, text="准备中...",
+            font=ctk.CTkFont(size=10),
+            text_color=C("accent")
+        )
+        progress_lbl.pack(side="right", padx=10)
+        
+        self._active_widgets[host] = (frame, lbl, progress_lbl)
+        
+        # 布局
+        idx = len(self._active_widgets) - 1
+        row = idx // self._active_cols
+        col = idx % self._active_cols
+        frame.grid(row=row, column=col, sticky="ew", padx=4, pady=2)
+        self._active_container.columnconfigure(col, weight=1)
+    
+    def _update_active_progress(self, host, current, total):
+        """更新指定目标的进度"""
+        if host not in self._active_widgets:
+            return
+        frame, lbl, progress_lbl = self._active_widgets[host]
+        progress_lbl.configure(text=f"{current}/{total}")
+    
+    def _remove_active_target(self, host):
+        """从正在测试列表中移除目标"""
+        if host not in self._active_widgets:
+            return
+        frame, lbl, progress_lbl = self._active_widgets[host]
+        frame.destroy()
+        del self._active_widgets[host]
+        
+        # 重新布局剩余项目
+        self._relayout_active_targets()
+        
+        # 如果没有正在测试的目标，隐藏容器
+        if not self._active_widgets:
+            self._active_frame.grid_remove()
+    
+    def _clear_active_targets(self):
+        """清空所有正在测试的目标"""
+        for frame, lbl, progress_lbl in self._active_widgets.values():
+            frame.destroy()
+        self._active_widgets.clear()
+        self._active_frame.grid_remove()
 
     def _set_status(self, msg):
         self._status_lbl.configure(text=msg)
