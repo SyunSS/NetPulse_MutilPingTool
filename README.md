@@ -191,7 +191,7 @@ log_YYYYMMDD_HHMMSS.txt      # 完整运行日志（含调试信息）
 ### 1️⃣ 环境要求
 
 - macOS
-- Python 3.x
+- Python 3.x（有 Python2.x 兼容版本在目录内，如较老版本 macos 可以使用此版本脚本）
 - tcping 可执行文件（已放在同目录）
 
 赋予 tcping 执行权限：
