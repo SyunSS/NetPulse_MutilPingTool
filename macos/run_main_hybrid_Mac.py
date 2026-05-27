@@ -127,6 +127,8 @@ with open(InputFile, "r", encoding="utf-8") as f:
         parts = line.split()
         if len(parts) == 2 and parts[1].isdigit():
             host, port = parts[0], int(parts[1])
+            if host.startswith("[") and host.endswith("]"):
+                host = host[1:-1]
         elif line.startswith("[") and "]" in line:
             end = line.find("]")
             host = line[1:end]

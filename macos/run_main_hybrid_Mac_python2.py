@@ -129,7 +129,16 @@ with open(InputFile, "r") as f:
 def run_ping(host):
     try:
         cmd = ["ping", "-c", str(PingCount), host]
-        out = subprocess.check_output(cmd)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        start = time.time()
+        timeout = PingCount * 3 + 2
+        while proc.poll() is None:
+            if time.time() - start > timeout:
+                proc.kill()
+                proc.wait()
+                return "Timeout", "100%", "N/A"
+            time.sleep(0.1)
+        out = proc.stdout.read()
 
         # 丢包
         loss_match = re.search(r"(\d+\.?\d*)% packet loss", out)
