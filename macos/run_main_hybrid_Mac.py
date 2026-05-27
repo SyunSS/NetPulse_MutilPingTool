@@ -127,7 +127,14 @@ with open(InputFile, "r", encoding="utf-8") as f:
         parts = line.split()
         if len(parts) == 2 and parts[1].isdigit():
             host, port = parts[0], int(parts[1])
-        elif ":" in line:
+        elif line.startswith("[") and "]" in line:
+            end = line.find("]")
+            host = line[1:end]
+            if len(line) > end + 1 and line[end + 1] == ":":
+                p = line[end + 2:]
+                if p.isdigit():
+                    port = int(p)
+        elif line.count(":") == 1:
             h, p = line.rsplit(":", 1)
             if p.isdigit():
                 host, port = h, int(p)

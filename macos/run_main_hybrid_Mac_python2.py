@@ -102,7 +102,16 @@ with open(InputFile, "r") as f:
         host = None
         port = None
 
-        if ":" in line:
+        if line.startswith("[") and "]" in line:
+            end = line.find("]")
+            host = line[1:end]
+            if len(line) > end + 1 and line[end + 1] == ":":
+                p = line[end + 2:]
+                if p.isdigit():
+                    port = int(p)
+        elif line.count(":") >= 2:
+            host = line
+        elif ":" in line:
             parts = line.split(":")
             if parts[-1].isdigit():
                 host = ":".join(parts[:-1])
