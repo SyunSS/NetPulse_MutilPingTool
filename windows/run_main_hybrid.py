@@ -153,6 +153,8 @@ with open(os.path.join(BASE_DIR, InputFile), "r", encoding="utf-8") as f:
         parts = line.split()
         if len(parts) == 2 and parts[1].isdigit():
             host, port = parts[0], int(parts[1])
+            if host.startswith("[") and host.endswith("]"):
+                host = host[1:-1]
         elif line.startswith("[") and "]" in line:
             end = line.find("]")
             host = line[1:end]
@@ -170,6 +172,17 @@ with open(os.path.join(BASE_DIR, InputFile), "r", encoding="utf-8") as f:
             host = line
 
         targets.append((host, port))
+        if host and host.count(":") >= 2:
+            last_colon = line.rfind(":")
+            possible_port = line[last_colon + 1:]
+            if possible_port.isdigit() and not line.startswith("["):
+                log(f"⚠️ 格式提示: \"{line}\" → IPv6 若带端口请使用 [IPv6]:端口 格式, "
+                    f"例如 [{host}]:{possible_port}")
+                print(f"⚠️ 格式提示: \"{line}\" → IPv6 若带端口请使用 [IPv6]:端口 格式, "
+                    f"例如 [{host}]:{possible_port}")
+        if ("[" in line) != ("]" in line):
+            log(f"⚠️ 格式提示: \"{line}\" → IPv6 括号不匹配")
+            print(f"⚠️ 格式提示: \"{line}\" → IPv6 括号不匹配")
 
 log(f"加载目标数量: {len(targets)}")
 
@@ -183,8 +196,8 @@ def run_ping(host):
             cmd, stderr=subprocess.STDOUT, timeout=PingCount * 3
         ).decode("gbk", errors="ignore")
 
-        loss_match = re.search(r"\((\d+)%\s*丢失\)", out)
-        avg_match = re.search(r"平均\s*=\s*(\d+)ms", out)
+        loss_match = re.search(r"\((\d+)%\s*(?:丢失|loss)\)", out, re.IGNORECASE)
+        avg_match = re.search(r"(?:平均|Average)\s*=\s*(\d+)ms", out, re.IGNORECASE)
 
         loss = f"{loss_match.group(1)}%" if loss_match else "100%"
         avg = avg_match.group(1) if avg_match else "Timeout"

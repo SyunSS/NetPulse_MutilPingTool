@@ -172,10 +172,27 @@ def save_config(cfg, base_dir=None):
         cfg.write(f)
 
 
+def check_entry_warnings(line, host, port):
+    """检查目标条目是否存在常见格式问题，返回警告列表"""
+    warnings = []
+    if host and host.count(":") >= 2:
+        last_colon = line.rfind(":")
+        possible_port = line[last_colon + 1:]
+        if possible_port.isdigit() and not line.startswith("["):
+            warnings.append(
+                f"  \"{line}\" → IPv6 地址若带端口请使用 [IPv6]:端口 格式, "
+                f"例如 [{host}]:{possible_port}"
+            )
+    if ("[" in line) != ("]" in line):
+        warnings.append(f"  \"{line}\" → IPv6 括号不匹配, 请检查 [ 和 ] 是否成对出现")
+    return warnings
+
+
 def load_targets(filepath):
     targets = []
+    warnings = []
     if not os.path.exists(filepath):
-        return targets
+        return targets, warnings
     with open(filepath, "r", encoding="utf-8") as f:
         for raw in f:
             line = raw.strip()
@@ -185,6 +202,8 @@ def load_targets(filepath):
             parts = line.split()
             if len(parts) == 2 and parts[1].isdigit():
                 host, port = parts[0], int(parts[1])
+                if host.startswith("[") and host.endswith("]"):
+                    host = host[1:-1]
             elif line.startswith("[") and "]" in line:
                 end = line.find("]")
                 host = line[1:end]
@@ -201,7 +220,8 @@ def load_targets(filepath):
             else:
                 host = line
             targets.append((host, port))
-    return targets
+            warnings.extend(check_entry_warnings(line, host, port))
+    return targets, warnings
 
 
 def run_ping(host, count, timeout_mult=3):
@@ -217,8 +237,8 @@ def run_ping(host, count, timeout_mult=3):
             cmd, stderr=subprocess.STDOUT, timeout=count * timeout_mult,
             startupinfo=startupinfo
         ).decode("gbk", errors="ignore")
-        loss_match = re.search(r"\((\d+)%\s*丢失\)", out)
-        avg_match  = re.search(r"平均\s*=\s*(\d+)ms", out)
+        loss_match = re.search(r"\((\d+)%\s*(?:丢失|loss)\)", out, re.IGNORECASE)
+        avg_match  = re.search(r"(?:平均|Average)\s*=\s*(\d+)ms", out, re.IGNORECASE)
         loss = f"{loss_match.group(1)}%" if loss_match else "100%"
         avg  = avg_match.group(1) if avg_match else "Timeout"
         return avg, loss
@@ -268,8 +288,8 @@ def run_ping_with_progress(host, count, progress_callback=None, timeout_mult=3, 
         proc.wait(timeout=count * timeout_mult)
         out = "".join(out_lines)
         
-        loss_match = re.search(r"\((\d+)%\s*丢失\)", out)
-        avg_match  = re.search(r"平均\s*=\s*(\d+)ms", out)
+        loss_match = re.search(r"\((\d+)%\s*(?:丢失|loss)\)", out, re.IGNORECASE)
+        avg_match  = re.search(r"(?:平均|Average)\s*=\s*(\d+)ms", out, re.IGNORECASE)
         loss = f"{loss_match.group(1)}%" if loss_match else "100%"
         avg  = avg_match.group(1) if avg_match else "Timeout"
         return avg, loss
@@ -421,10 +441,10 @@ def worker_func(idx, host, port, mode, cfg, base_dir):
 def worker_func_with_progress(idx, host, port, mode, cfg, base_dir, result_q, ping_count, tcp_count, stop_event):
     """带进度回调的 worker 函数"""
     default_port = cfg.getint("GENERAL", "DefaultTCPPort", fallback=443)
-    
+
     def progress_callback(current, total):
-        result_q.put(("update_active", host, current, total))
-    
+        result_q.put(("update_active", host, port, current, total))
+
     if mode == "1":
         avg, loss = run_ping_with_progress(host, ping_count, progress_callback, stop_event=stop_event)
         proto = "ICMP"
@@ -439,7 +459,7 @@ def worker_func_with_progress(idx, host, port, mode, cfg, base_dir, result_q, pi
         else:
             avg, loss = run_ping_with_progress(host, ping_count, progress_callback, stop_event=stop_event)
             proto = "ICMP"
-    return idx, host, proto, avg, loss
+    return idx, host, port, proto, avg, loss
 
 
 # ============================================================
@@ -899,26 +919,19 @@ class App(ctk.CTk):
         bar.pack(fill="x", side="top")
         bar.pack_propagate(False)
 
+        # ── 左侧：标题 ────────────────────────────
         ctk.CTkLabel(
             bar, text="⚡ NetPulse",
             font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"),
             text_color=C("accent")
-        ).pack(side="left", padx=20)
+        ).pack(side="left", padx=(20, 0))
 
         ctk.CTkLabel(
             bar, text="Multi-Ping Tool  ·  GUI Edition",
             font=ctk.CTkFont(size=12), text_color=C("text_secondary")
-        ).pack(side="left", padx=4)
+        ).pack(side="left")
 
-        # ── 出口 IP 显示（中间）──────────────────
-        self._ip_lbl = ctk.CTkLabel(
-            bar, text="🌐 获取中...",
-            font=ctk.CTkFont(size=11),
-            text_color=C("text_secondary")
-        )
-        self._ip_lbl.pack(side="left", padx=(20, 0))
-
-        # ── 皮肤选择（右侧）──────────────────────
+        # ── 右侧（必须先 pack，留给中间剩余空间）──
         right_bar = ctk.CTkFrame(bar, fg_color="transparent")
         right_bar.pack(side="right", padx=14)
 
@@ -930,7 +943,7 @@ class App(ctk.CTk):
         self._theme_cb = ctk.CTkComboBox(
             right_bar,
             values=theme_names,
-            width=120, height=30,
+            width=100, height=30,
             fg_color=C("bg_input"), border_color=C("border"),
             button_color=C("border"), button_hover_color=C("accent"),
             dropdown_fg_color=C("bg_card"),
@@ -940,28 +953,36 @@ class App(ctk.CTk):
             command=self._switch_theme
         )
         self._theme_cb.set(self._theme_name)
-        self._theme_cb.pack(side="left", padx=(0, 14))
+        self._theme_cb.pack(side="left", padx=(0, 8))
 
-        # ── 工作目录 ──────────────────────────────
-        ctk.CTkLabel(right_bar, text="工作目录:",
+        ctk.CTkLabel(right_bar, text="目录:",
                      font=ctk.CTkFont(size=12),
                      text_color=C("text_secondary")).pack(side="left")
 
         self._dir_entry = ctk.CTkEntry(
             right_bar, textvariable=self.base_dir,
-            width=220, height=30,
+            width=120, height=30,
             fg_color=C("bg_input"), border_color=C("border"),
             font=ctk.CTkFont(size=11)
         )
         self._dir_entry.pack(side="left", padx=6)
 
         ctk.CTkButton(
-            right_bar, text="浏览", width=52, height=30,
+            right_bar, text="浏览", width=50, height=30,
             command=self._browse_dir,
             fg_color=C("bg_input"), hover_color=C("border"),
             border_width=1, border_color=C("border"),
             font=ctk.CTkFont(size=11)
         ).pack(side="left")
+
+        # ── 中间：出口 IP（自动填满剩余空间）─────
+        self._ip_lbl = ctk.CTkLabel(
+            bar, text="🌐 获取中...",
+            font=ctk.CTkFont(size=11),
+            text_color=C("text_secondary"),
+            anchor="w"
+        )
+        self._ip_lbl.pack(side="left", fill="x", expand=True, padx=(20, 0))
 
     # ── 左侧面板 ─────────────────────────────────────────────
     def _build_left(self, parent):
@@ -1362,10 +1383,21 @@ class App(ctk.CTk):
             return
         self._save_iplist()
         self._save_cfg()
-        self.targets = load_targets(self._iplist_path())
+        self.targets, warnings = load_targets(self._iplist_path())
         if not self.targets:
             messagebox.showwarning("提示", "目标列表为空，请先添加测试目标！")
             return
+        if warnings:
+            messagebox.showwarning(
+                "格式提示",
+                "以下条目可能存在格式问题:\n\n"
+                + "\n".join(warnings)
+                + "\n\n支持的 IPv6 格式:\n"
+                  "  • ::1                (裸 IPv6, 无端口, 使用 ICMP)\n"
+                  "  • [::1]:443          (括号格式, 带端口, 使用 TCP)\n"
+                  "  • ::1 443            (空格分离, 带端口, 使用 TCP)\n"
+                  "  • 目的地址:端口       (IPv4/域名冒号分离端口)"
+            )
         self.running = True
         self.stop_flag.clear()
         self._run_btn.configure(state="disabled")
@@ -1481,7 +1513,7 @@ class App(ctk.CTk):
                         future.cancel()
                     break
                 try:
-                    idx, host, proto, avg, loss = f.result()
+                    idx, host, port, proto, avg, loss = f.result()
                     results[idx] = (host, proto, avg, loss)
                     color = "normal"
                     if avg in ("Timeout",) or avg.startswith("N/A"):
@@ -1501,7 +1533,7 @@ class App(ctk.CTk):
                     self.result_q.put(("progress", completed / len(targets)))
                     self.result_q.put(("stats", completed,
                                        stat["ok"], stat["slow"], stat["fail"]))
-                    self.result_q.put(("remove_active", host))
+                    self.result_q.put(("remove_active", host, port))
                 except Exception as e:
                     self.result_q.put(("log", f"  ⚠️  任务异常: {e}\n", "warning"))
 
@@ -1545,11 +1577,11 @@ class App(ctk.CTk):
                     _, host, port, mode = item
                     self._add_active_target(host, port, mode)
                 elif cmd == "update_active":
-                    _, host, current, total = item
-                    self._update_active_progress(host, current, total)
+                    _, host, port, current, total = item
+                    self._update_active_progress(host, port, current, total)
                 elif cmd == "remove_active":
-                    _, host = item
-                    self._remove_active_target(host)
+                    _, host, port = item
+                    self._remove_active_target(host, port)
                 elif cmd == "done":
                     self.running = False
                     self._run_btn.configure(state="normal")
@@ -1608,7 +1640,7 @@ class App(ctk.CTk):
             widget.grid_forget()
         
         # 重新布局
-        for idx, (host, (frame, lbl, progress_lbl)) in enumerate(self._active_widgets.items()):
+        for idx, (key, (frame, lbl, progress_lbl)) in enumerate(self._active_widgets.items()):
             row = idx // self._active_cols
             col = idx % self._active_cols
             frame.grid(row=row, column=col, sticky="ew", padx=4, pady=2)
@@ -1618,17 +1650,21 @@ class App(ctk.CTk):
             self._active_container.columnconfigure(c, weight=1)
 
     # ── 正在测试列表管理 ─────────────────────────────────────
+    def _active_key(self, host, port):
+        return f"{host}:{port}" if port else host
+
     def _add_active_target(self, host, port, mode):
         """添加一个正在测试的目标到列表"""
-        if host in self._active_widgets:
+        key = self._active_key(host, port)
+        if key in self._active_widgets:
             return
-        
+
         # 显示容器
         self._active_frame.grid()
-        
+
         # 创建进度项
         frame = ctk.CTkFrame(self._active_container, fg_color=C("bg_input"), corner_radius=6)
-        
+
         # 目标信息
         proto = "ICMP" if mode == "1" else (f"TCP:{port}" if port else "TCP")
         info_text = f"{host} ({proto})"
@@ -1638,7 +1674,7 @@ class App(ctk.CTk):
             text_color=C("text_primary")
         )
         lbl.pack(side="left", padx=(10, 5))
-        
+
         # 进度标签
         progress_lbl = ctk.CTkLabel(
             frame, text="准备中...",
@@ -1646,9 +1682,9 @@ class App(ctk.CTk):
             text_color=C("accent")
         )
         progress_lbl.pack(side="right", padx=10)
-        
-        self._active_widgets[host] = (frame, lbl, progress_lbl)
-        
+
+        self._active_widgets[key] = (frame, lbl, progress_lbl)
+
         # 布局
         idx = len(self._active_widgets) - 1
         row = idx // self._active_cols
@@ -1656,20 +1692,22 @@ class App(ctk.CTk):
         frame.grid(row=row, column=col, sticky="ew", padx=4, pady=2)
         self._active_container.columnconfigure(col, weight=1)
     
-    def _update_active_progress(self, host, current, total):
+    def _update_active_progress(self, host, port, current, total):
         """更新指定目标的进度"""
-        if host not in self._active_widgets:
+        key = self._active_key(host, port)
+        if key not in self._active_widgets:
             return
-        frame, lbl, progress_lbl = self._active_widgets[host]
+        frame, lbl, progress_lbl = self._active_widgets[key]
         progress_lbl.configure(text=f"{current}/{total}")
-    
-    def _remove_active_target(self, host):
+
+    def _remove_active_target(self, host, port):
         """从正在测试列表中移除目标"""
-        if host not in self._active_widgets:
+        key = self._active_key(host, port)
+        if key not in self._active_widgets:
             return
-        frame, lbl, progress_lbl = self._active_widgets[host]
+        frame, lbl, progress_lbl = self._active_widgets[key]
         frame.destroy()
-        del self._active_widgets[host]
+        del self._active_widgets[key]
         
         # 重新布局剩余项目
         self._relayout_active_targets()

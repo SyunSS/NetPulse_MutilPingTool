@@ -13,3 +13,8 @@ networktest.xboxlive.com
 gst.prod.dl.playstation.net
 post.net.playstation.net
 ctest-dl-lp1.cdn.nintendo.net
+# ─── IPv6 格式参考 ───
+# IPv6 必须使用 [IPv6] 括号格式才能被正确识别:
+#   [2400:3200::1]      不带端口, 走 ICMP
+#   [2400:3200::1]:443  带端口, 走 TCP
+# 注意: 不带 [] 的裸 IPv6 地址无法使用
