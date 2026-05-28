@@ -92,12 +92,19 @@ if mode not in ["1", "2", "3"]:
 # 读取目标
 # ==================================================
 targets = []
+cli_warnings = []
 
 with open(InputFile, "r") as f:
     for raw in f:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
+
+        if ("[" in line) != ("]" in line):
+            cli_warnings.append('  "' + line + '" \u2192 IPv6 \u62ec\u53f7\u4e0d\u5339\u914d')
+        host_only = line.split()[0]
+        if host_only.count(":") >= 2 and not host_only.startswith("["):
+            cli_warnings.append('  "' + line + '" \u2192 IPv6 \u5fc5\u987b\u52a0 []\uff0c\u8bf7\u6539\u7528 [' + host_only + ']')
 
         host = None
         port = None
@@ -122,6 +129,16 @@ with open(InputFile, "r") as f:
             host = line
 
         targets.append((host, port))
+
+if cli_warnings:
+    print("\n\u26a0\ufe0f  \u4ee5\u4e0b\u6761\u76ee\u5b58\u5728\u683c\u5f0f\u95ee\u9898:")
+    for w in cli_warnings:
+        print(" " + w)
+    print("\n\u6b63\u786e\u7684 IPv6 \u683c\u5f0f: [IPv6] (\u65e0\u7aef\u53e3) \u6216 [IPv6]:\u7aef\u53e3 (\u5e26\u7aef\u53e3)")
+    ans = raw_input("\n\u662f\u5426\u5ffd\u7565\u5e76\u7ee7\u7eed\uff1f(y/N): ").strip().lower()
+    if ans != "y":
+        print("\u5df2\u53d6\u6d88")
+        sys.exit(0)
 
 # ==================================================
 # ICMP（带 stddev）
