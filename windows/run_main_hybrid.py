@@ -140,6 +140,7 @@ log(f"选择模式: {mode}")
 # 读取目标
 # ==================================================
 targets = []
+cli_warnings = []
 
 with open(os.path.join(BASE_DIR, InputFile), "r", encoding="utf-8") as f:
     for raw in f:
@@ -149,6 +150,12 @@ with open(os.path.join(BASE_DIR, InputFile), "r", encoding="utf-8") as f:
 
         host = None
         port = None
+
+        if ("[" in line) != ("]" in line):
+            cli_warnings.append(f"  \"{line}\" → IPv6 括号不匹配")
+        host_only = line.split()[0]
+        if host_only.count(":") >= 2 and not host_only.startswith("["):
+            cli_warnings.append(f"  \"{line}\" → IPv6 必须加 []，请改用 [{host_only}]")
 
         parts = line.split()
         if len(parts) == 2 and parts[1].isdigit():
@@ -172,17 +179,16 @@ with open(os.path.join(BASE_DIR, InputFile), "r", encoding="utf-8") as f:
             host = line
 
         targets.append((host, port))
-        if host and host.count(":") >= 2:
-            last_colon = line.rfind(":")
-            possible_port = line[last_colon + 1:]
-            if possible_port.isdigit() and not line.startswith("["):
-                log(f"⚠️ 格式提示: \"{line}\" → IPv6 若带端口请使用 [IPv6]:端口 格式, "
-                    f"例如 [{host}]:{possible_port}")
-                print(f"⚠️ 格式提示: \"{line}\" → IPv6 若带端口请使用 [IPv6]:端口 格式, "
-                    f"例如 [{host}]:{possible_port}")
-        if ("[" in line) != ("]" in line):
-            log(f"⚠️ 格式提示: \"{line}\" → IPv6 括号不匹配")
-            print(f"⚠️ 格式提示: \"{line}\" → IPv6 括号不匹配")
+
+if cli_warnings:
+    print("\n⚠️  以下条目存在格式问题:")
+    for w in cli_warnings:
+        print(f"  {w}")
+    print("\n正确的 IPv6 格式: [IPv6] (无端口) 或 [IPv6]:端口 (带端口)")
+    ans = input("\n是否忽略并继续？(y/N): ").strip().lower()
+    if ans != "y":
+        print("已取消")
+        sys.exit(0)
 
 log(f"加载目标数量: {len(targets)}")
 

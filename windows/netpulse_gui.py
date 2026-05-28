@@ -175,14 +175,11 @@ def save_config(cfg, base_dir=None):
 def check_entry_warnings(line, host, port):
     """检查目标条目是否存在常见格式问题，返回警告列表"""
     warnings = []
-    if host and host.count(":") >= 2:
-        last_colon = line.rfind(":")
-        possible_port = line[last_colon + 1:]
-        if possible_port.isdigit() and not line.startswith("["):
-            warnings.append(
-                f"  \"{line}\" → IPv6 地址若带端口请使用 [IPv6]:端口 格式, "
-                f"例如 [{host}]:{possible_port}"
-            )
+    if host and host.count(":") >= 2 and not line.startswith("["):
+        warnings.append(
+            f"  \"{line}\" → IPv6 地址必须加 [] 才能识别, "
+            f"请改用 [{host}]"
+        )
     if ("[" in line) != ("]" in line):
         warnings.append(f"  \"{line}\" → IPv6 括号不匹配, 请检查 [ 和 ] 是否成对出现")
     return warnings
@@ -1388,16 +1385,17 @@ class App(ctk.CTk):
             messagebox.showwarning("提示", "目标列表为空，请先添加测试目标！")
             return
         if warnings:
-            messagebox.showwarning(
+            proceed = messagebox.askokcancel(
                 "格式提示",
                 "以下条目可能存在格式问题:\n\n"
                 + "\n".join(warnings)
-                + "\n\n支持的 IPv6 格式:\n"
-                  "  • ::1                (裸 IPv6, 无端口, 使用 ICMP)\n"
-                  "  • [::1]:443          (括号格式, 带端口, 使用 TCP)\n"
-                  "  • ::1 443            (空格分离, 带端口, 使用 TCP)\n"
-                  "  • 目的地址:端口       (IPv4/域名冒号分离端口)"
+                + "\n\n正确的 IPv6 格式:\n"
+                  "  • [IPv6]          无端口, 走 ICMP\n"
+                  "  • [IPv6]:端口     带端口, 走 TCP\n\n"
+                  "是否仍要继续？"
             )
+            if not proceed:
+                return
         self.running = True
         self.stop_flag.clear()
         self._run_btn.configure(state="disabled")
