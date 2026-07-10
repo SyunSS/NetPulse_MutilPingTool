@@ -12,6 +12,7 @@ GUI Edition: v2 (Cron Wizard + Multi-Theme)
 import subprocess
 import sys
 import os
+import socket
 import time
 import re
 import configparser
@@ -153,6 +154,7 @@ def load_config(base_dir=None):
     defaults = {
         "PingCount": "4", "TcpingCount": "4",
         "DefaultTCPPort": "443", "Threads": "5", "InputFile": "iplist.txt",
+        "EnableTCPFallback": "True",
     }
     if not cfg.has_section("GENERAL"):
         cfg.add_section("GENERAL")
@@ -170,6 +172,22 @@ def save_config(cfg, base_dir=None):
     d = base_dir or BASE_DIR
     with open(os.path.join(d, "config.ini"), "w", encoding="utf-8") as f:
         cfg.write(f)
+
+
+def sanitize_host(host):
+    """清理 URL 前缀和尾部路径，只保留纯净域名/IP"""
+    if not host:
+        return host
+    import re as _re
+    # 去掉 http:// 或 https:// 前缀
+    host = _re.sub(r'^https?://', '', host, flags=_re.IGNORECASE)
+    # 去掉尾部 / 及之后的一切 (/path, #anchor, ?query)
+    host = host.split('/')[0]
+    host = host.split('#')[0]
+    host = host.split('?')[0]
+    # 去掉尾部冒号（如 "example.com:" → "example.com"）
+    host = host.rstrip(':')
+    return host
 
 
 def check_entry_warnings(line, host, port):
@@ -216,6 +234,8 @@ def load_targets(filepath):
                     host = line
             else:
                 host = line
+            # 自动清理 http://、https:// 前缀和尾部路径
+            host = sanitize_host(host)
             targets.append((host, port))
             warnings.extend(check_entry_warnings(line, host, port))
     return targets, warnings
@@ -414,10 +434,40 @@ def run_tcping_with_progress(host, port, count, base_dir, progress_callback=None
     return str(int(sum(times) / len(times))), loss
 
 
-def worker_func(idx, host, port, mode, cfg, base_dir):
+def resolve_host(host):
+    """解析域名 → 返回首要 IP（实际被 ping/tcping 使用的那个）"""
+    try:
+        socket.inet_pton(socket.AF_INET, host)
+        return ""
+    except (socket.error, AttributeError):
+        pass
+    try:
+        socket.inet_pton(socket.AF_INET6, host)
+        return ""
+    except (socket.error, AttributeError):
+        pass
+    try:
+        info = socket.getaddrinfo(host, None)
+        ips = sorted(set(item[4][0] for item in info))
+        if not ips:
+            return ""
+        # 只返回首个 IP（ping 实际命中的 IP）
+        primary = ips[0]
+        # 如果解析到多个 IP，简短标注总数
+        extra = f" +{len(ips) - 1}" if len(ips) > 1 else ""
+        return primary + extra
+    except socket.error:
+        return ""
+
+
+def worker_func(idx, host, port, mode, cfg, base_dir, enable_fallback=True):
     ping_count   = cfg.getint("GENERAL", "PingCount",      fallback=4)
     tcp_count    = cfg.getint("GENERAL", "TcpingCount",    fallback=4)
     default_port = cfg.getint("GENERAL", "DefaultTCPPort", fallback=443)
+
+    resolved = resolve_host(host)
+    ip_part = f",{resolved}" if resolved else ""
+
     if mode == "1":
         avg, loss = run_ping(host, ping_count)
         proto = "ICMP"
@@ -426,18 +476,39 @@ def worker_func(idx, host, port, mode, cfg, base_dir):
         avg, loss = run_tcping(host, p, tcp_count, base_dir)
         proto = f"TCP:{p}"
     else:
+        # mode 3: 混合模式
         if port:
             avg, loss = run_tcping(host, port, tcp_count, base_dir)
             proto = f"TCP:{port}"
         else:
+            # 无端口：根据开关决定是否级联回退
             avg, loss = run_ping(host, ping_count)
-            proto = "ICMP"
-    return idx, host, proto, avg, loss
+            if avg != "Timeout" and loss != "100%":
+                proto = "ICMP"
+            elif enable_fallback:
+                avg80, loss80 = run_tcping(host, 80, tcp_count, base_dir)
+                if avg80 != "Timeout" and loss80 != "100%":
+                    avg, loss = avg80, loss80
+                    proto = "TCP:80"
+                else:
+                    avg443, loss443 = run_tcping(host, 443, tcp_count, base_dir)
+                    if avg443 != "Timeout" and loss443 != "100%":
+                        avg, loss = avg443, loss443
+                        proto = "TCP:443"
+                    else:
+                        proto = "ALL_FAIL"
+            else:
+                proto = "ICMP"
+
+    return idx, host, proto, avg, loss, ip_part
 
 
-def worker_func_with_progress(idx, host, port, mode, cfg, base_dir, result_q, ping_count, tcp_count, stop_event):
+def worker_func_with_progress(idx, host, port, mode, cfg, base_dir, result_q, ping_count, tcp_count, stop_event, enable_fallback=True):
     """带进度回调的 worker 函数"""
     default_port = cfg.getint("GENERAL", "DefaultTCPPort", fallback=443)
+
+    resolved = resolve_host(host)
+    ip_part = f",{resolved}" if resolved else ""
 
     def progress_callback(current, total):
         result_q.put(("update_active", host, port, current, total))
@@ -454,9 +525,25 @@ def worker_func_with_progress(idx, host, port, mode, cfg, base_dir, result_q, pi
             avg, loss = run_tcping_with_progress(host, port, tcp_count, base_dir, progress_callback, stop_event=stop_event)
             proto = f"TCP:{port}"
         else:
+            # 无端口：根据开关决定是否级联回退
             avg, loss = run_ping_with_progress(host, ping_count, progress_callback, stop_event=stop_event)
-            proto = "ICMP"
-    return idx, host, port, proto, avg, loss
+            if avg != "Timeout" and loss != "100%":
+                proto = "ICMP"
+            elif enable_fallback:
+                avg80, loss80 = run_tcping_with_progress(host, 80, tcp_count, base_dir, progress_callback, stop_event=stop_event)
+                if avg80 != "Timeout" and loss80 != "100%":
+                    avg, loss = avg80, loss80
+                    proto = "TCP:80"
+                else:
+                    avg443, loss443 = run_tcping_with_progress(host, 443, tcp_count, base_dir, progress_callback, stop_event=stop_event)
+                    if avg443 != "Timeout" and loss443 != "100%":
+                        avg, loss = avg443, loss443
+                        proto = "TCP:443"
+                    else:
+                        proto = "ALL_FAIL"
+            else:
+                proto = "ICMP"
+    return idx, host, port, proto, avg, loss, ip_part
 
 
 # ============================================================
@@ -1026,12 +1113,27 @@ class App(ctk.CTk):
                 font=ctk.CTkFont(size=12)
             ).grid(row=r, column=1, padx=(0,12), pady=3, sticky="e")
 
+        # TCP 回退开关
+        r = len(fields)
+        fallback_val = self.cfg.get("GENERAL", "EnableTCPFallback", fallback="True")
+        self._tcp_fallback_var = tk.StringVar(value=fallback_val)
+        cb = ctk.CTkCheckBox(
+            cfg_f, text="ICMP 不通时自动 TCP 回退",
+            variable=self._tcp_fallback_var,
+            onvalue="True", offvalue="False",
+            font=ctk.CTkFont(size=12),
+            text_color=C("text_secondary"),
+            fg_color=C("accent"), hover_color=C("accent_hover"),
+            border_color=C("border"), checkmark_color=C("bg_dark"),
+        )
+        cb.grid(row=r, column=0, columnspan=2, padx=(12,6), pady=3, sticky="w")
+
         ctk.CTkButton(
             cfg_f, text="💾 保存配置", height=30,
             command=self._save_cfg,
             fg_color=C("accent"), hover_color=C("accent_hover"),
             font=ctk.CTkFont(size=12, weight="bold")
-        ).grid(row=len(fields), column=0, columnspan=2,
+        ).grid(row=r + 1, column=0, columnspan=2,
                padx=12, pady=(4, 8), sticky="ew")
 
         # 目标列表
@@ -1256,6 +1358,21 @@ class App(ctk.CTk):
         self._output.grid(row=1, column=0, sticky="nsew", padx=1, pady=(0,1))
         self._output.configure(state="disabled")
 
+        # 预定义彩色标签，避免每次插入都重新 tag_configure
+        inner: tk.Text = self._output._textbox
+        color_map = {
+            "normal":  C("text_primary"),
+            "ok":      C("ping_ok"),
+            "slow":    C("ping_slow"),
+            "fail":    C("ping_fail"),
+            "accent":  C("accent"),
+            "warning": C("warning"),
+        }
+        for color_key, fg in color_map.items():
+            inner.tag_configure(f"color_{color_key}", foreground=fg)
+        self._output_color_map = color_map
+        self._output_line_count = 0  # 追踪行数，用于削峰滚动
+
         # 进度条
         self._progress = ctk.CTkProgressBar(
             parent, height=6, corner_radius=3,
@@ -1366,6 +1483,7 @@ class App(ctk.CTk):
     def _save_cfg(self):
         for key, var in self._cfg_vars.items():
             self.cfg.set("GENERAL", key, var.get())
+        self.cfg.set("GENERAL", "EnableTCPFallback", self._tcp_fallback_var.get())
         self.cfg.set("CRON", "Timing", self._cron_var.get().strip())
         self.cfg.set("GENERAL", "InputFile", self._iplist_var.get())
         try:
@@ -1480,6 +1598,7 @@ class App(ctk.CTk):
         threads = cfg.getint("GENERAL", "Threads", fallback=5)
         ping_count = cfg.getint("GENERAL", "PingCount", fallback=4)
         tcp_count = cfg.getint("GENERAL", "TcpingCount", fallback=4)
+        enable_fallback = cfg.get("GENERAL", "EnableTCPFallback", fallback="True") == "True"
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.result_q.put(("log",
@@ -1491,15 +1610,11 @@ class App(ctk.CTk):
         results = [None] * len(targets)
         completed = 0
         stat = {"ok": 0, "slow": 0, "fail": 0}
-        
-        # 添加所有目标到正在测试列表
-        for h, p in targets:
-            self.result_q.put(("add_active", h, p, mode))
 
         with ThreadPoolExecutor(max_workers=threads) as pool:
             futures = {
                 pool.submit(worker_func_with_progress, i, h, p, mode, cfg, bd, 
-                           self.result_q, ping_count, tcp_count, self.stop_flag): i
+                           self.result_q, ping_count, tcp_count, self.stop_flag, enable_fallback): i
                 for i, (h, p) in enumerate(targets)
             }
             for f in as_completed(futures):
@@ -1511,10 +1626,10 @@ class App(ctk.CTk):
                         future.cancel()
                     break
                 try:
-                    idx, host, port, proto, avg, loss = f.result()
-                    results[idx] = (host, proto, avg, loss)
+                    idx, host, port, proto, avg, loss, ip_part = f.result()
+                    results[idx] = (host, proto, avg, loss, ip_part)
                     color = "normal"
-                    if avg in ("Timeout",) or avg.startswith("N/A"):
+                    if avg in ("Timeout",) or avg.startswith("N/A") or proto == "ALL_FAIL":
                         color = "fail"; stat["fail"] += 1
                     else:
                         try:
@@ -1526,7 +1641,8 @@ class App(ctk.CTk):
                         except ValueError:
                             color = "fail"; stat["fail"] += 1
                     completed += 1
-                    line = f"  {host:<35} {proto:<12} {avg+'ms':<12} 丢包:{loss}"
+                    ip_display = f" [{ip_part[1:]}]" if ip_part else ""
+                    line = f"  {host:<35} {proto:<12} {avg+'ms':<12} 丢包:{loss}{ip_display}"
                     self.result_q.put(("result_line", line, color))
                     self.result_q.put(("progress", completed / len(targets)))
                     self.result_q.put(("stats", completed,
@@ -1537,8 +1653,8 @@ class App(ctk.CTk):
 
         out_ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = os.path.join(bd, f"result_{out_ts}.txt")
-        lines = [f"{h},{pr},{a},{l}" for r in results
-                 if r for h, pr, a, l in [r]]
+        lines = [f"{h},{pr},{a},{l}{ip}" for r in results
+                 if r for h, pr, a, l, ip in [r]]
         try:
             with open(out_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(lines))
@@ -1595,21 +1711,16 @@ class App(ctk.CTk):
         self.after(80, self._poll_queue)
 
     def _append_output(self, text, color="normal"):
-        color_map = {
-            "normal":  C("text_primary"),
-            "ok":      C("ping_ok"),
-            "slow":    C("ping_slow"),
-            "fail":    C("ping_fail"),
-            "accent":  C("accent"),
-            "warning": C("warning"),
-        }
-        fg = color_map.get(color, C("text_primary"))
+        """追加彩色文本到输出区域（性能优化版）"""
+        fg = self._output_color_map.get(color, self._output_color_map["normal"])
+        tag = f"color_{color}"
         self._output.configure(state="normal")
         inner: tk.Text = self._output._textbox
-        tag = f"color_{color}"
-        inner.tag_configure(tag, foreground=fg)
         inner.insert("end", text, tag)
-        inner.see("end")
+        # 削峰: 每 20 行或结尾才滚动，避免频繁重算视口
+        self._output_line_count += text.count("\n")
+        if self._output_line_count % 20 == 0 or not text.endswith("\n"):
+            inner.see("end")
         self._output.configure(state="disabled")
 
     # ── 窗口大小变化处理 ─────────────────────────────────────
@@ -1664,8 +1775,7 @@ class App(ctk.CTk):
         frame = ctk.CTkFrame(self._active_container, fg_color=C("bg_input"), corner_radius=6)
 
         # 目标信息
-        proto = "ICMP" if mode == "1" else (f"TCP:{port}" if port else "TCP")
-        info_text = f"{host} ({proto})"
+        info_text = host if not port else f"{host}:{port}"
         lbl = ctk.CTkLabel(
             frame, text=info_text,
             font=ctk.CTkFont(size=11),
@@ -1675,7 +1785,7 @@ class App(ctk.CTk):
 
         # 进度标签
         progress_lbl = ctk.CTkLabel(
-            frame, text="准备中...",
+            frame, text="0/4",
             font=ctk.CTkFont(size=10),
             text_color=C("accent")
         )
@@ -1691,12 +1801,18 @@ class App(ctk.CTk):
         self._active_container.columnconfigure(col, weight=1)
     
     def _update_active_progress(self, host, port, current, total):
-        """更新指定目标的进度"""
+        """更新指定目标的进度（首次调用时懒创建 widget）"""
         key = self._active_key(host, port)
         if key not in self._active_widgets:
-            return
+            # 懒创建: 目标第一次产生进度才创建 widget
+            self._add_active_target(host, port, "3")
         frame, lbl, progress_lbl = self._active_widgets[key]
         progress_lbl.configure(text=f"{current}/{total}")
+        # 进度过半变色提示
+        if current >= total:
+            progress_lbl.configure(text_color=C("success"))
+        elif current > total // 2:
+            progress_lbl.configure(text_color=C("warning"))
 
     def _remove_active_target(self, host, port):
         """从正在测试列表中移除目标"""
@@ -1706,10 +1822,10 @@ class App(ctk.CTk):
         frame, lbl, progress_lbl = self._active_widgets[key]
         frame.destroy()
         del self._active_widgets[key]
-        
-        # 重新布局剩余项目
+
+        # 重新布局剩余项目（懒加载下最多 threads 个 widget，开销极小）
         self._relayout_active_targets()
-        
+
         # 如果没有正在测试的目标，隐藏容器
         if not self._active_widgets:
             self._active_frame.grid_remove()
@@ -1733,6 +1849,7 @@ class App(ctk.CTk):
         self._output.configure(state="normal")
         self._output.delete("1.0", "end")
         self._output.configure(state="disabled")
+        self._output_line_count = 0  # 重置行计数器
         self._progress.set(0)
         self._reset_stats()
         self._set_status("待机")

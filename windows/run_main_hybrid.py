@@ -1,7 +1,8 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 import subprocess
 import sys
 import os
+import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -78,6 +79,7 @@ TcpingCount = config.getint("GENERAL", "TcpingCount", fallback=4)
 DefaultTCPPort = config.getint("GENERAL", "DefaultTCPPort", fallback=443)
 Threads = config.getint("GENERAL", "Threads", fallback=5)
 InputFile = config.get("GENERAL", "InputFile", fallback="iplist.txt")
+EnableTCPFallback = config.get("GENERAL", "EnableTCPFallback", fallback="True") == "True"
 
 # Cron
 CronExpr = None
@@ -178,6 +180,7 @@ with open(os.path.join(BASE_DIR, InputFile), "r", encoding="utf-8") as f:
         else:
             host = line
 
+        host = sanitize_host(host)
         targets.append((host, port))
 
 if cli_warnings:
@@ -191,6 +194,21 @@ if cli_warnings:
         sys.exit(0)
 
 log(f"加载目标数量: {len(targets)}")
+
+# ==================================================
+# URL 清理
+# ==================================================
+def sanitize_host(host):
+    """清理 URL 前缀和尾部路径，只保留纯净域名/IP"""
+    if not host:
+        return host
+    import re as _re
+    host = _re.sub(r'^https?://', '', host, flags=_re.IGNORECASE)
+    host = host.split('/')[0]
+    host = host.split('#')[0]
+    host = host.split('?')[0]
+    host = host.rstrip(':')
+    return host
 
 # ==================================================
 # ICMP
@@ -213,6 +231,32 @@ def run_ping(host):
     except Exception as e:
         log(f"PING 异常 {host}: {e}")
         return "Timeout", "100%"
+
+# ==================================================
+# DNS 解析
+# ==================================================
+def resolve_host(host):
+    """解析域名 → 返回首要 IP（实际被 ping/tcping 使用的那个）"""
+    try:
+        socket.inet_pton(socket.AF_INET, host)
+        return ""
+    except (socket.error, AttributeError):
+        pass
+    try:
+        socket.inet_pton(socket.AF_INET6, host)
+        return ""
+    except (socket.error, AttributeError):
+        pass
+    try:
+        info = socket.getaddrinfo(host, None)
+        ips = sorted(set(item[4][0] for item in info))
+        if not ips:
+            return ""
+        primary = ips[0]
+        extra = f" +{len(ips) - 1}" if len(ips) > 1 else ""
+        return primary + extra
+    except socket.error:
+        return ""
 
 # ==================================================
 # TCPing
@@ -269,19 +313,53 @@ def run_tcping(host, port):
 # ==================================================
 def worker(idx, host, port):
     if mode == "1":
+        resolved = resolve_host(host)
+        ip_part = f",{resolved}" if resolved else ""
         avg, loss = run_ping(host)
-        result = f"{host},ICMP,{avg},{loss}"
+        result = f"{host},ICMP,{avg},{loss}{ip_part}"
     elif mode == "2":
+        resolved = resolve_host(host)
+        ip_part = f",{resolved}" if resolved else ""
         p = port if port else DefaultTCPPort
         avg, loss = run_tcping(host, p)
-        result = f"{host},TCP:{p},{avg},{loss}"
+        result = f"{host},TCP:{p},{avg},{loss}{ip_part}"
     else:
+        # mode 3: 混合模式
         if port:
+            resolved = resolve_host(host)
+            ip_part = f",{resolved}" if resolved else ""
             avg, loss = run_tcping(host, port)
-            result = f"{host},TCP:{port},{avg},{loss}"
+            result = f"{host},TCP:{port},{avg},{loss}{ip_part}"
         else:
+            resolved = resolve_host(host)
+            ip_part = f",{resolved}" if resolved else ""
+
+            # 第一步: ICMP
             avg, loss = run_ping(host)
-            result = f"{host},ICMP,{avg},{loss}"
+            if avg != "Timeout" and loss != "100%":
+                result = f"{host},ICMP,{avg},{loss}{ip_part}"
+                return idx, result
+
+            # 开关关闭则直接返回 ICMP 结果
+            if not EnableTCPFallback:
+                result = f"{host},ICMP,{avg},{loss}{ip_part}"
+                return idx, result
+
+            # 第二步: TCP 80
+            avg80, loss80 = run_tcping(host, 80)
+            if avg80 != "Timeout" and loss80 != "100%":
+                result = f"{host},TCP:80,{avg80},{loss80}{ip_part}"
+                return idx, result
+
+            # 第三步: TCP 443
+            avg443, loss443 = run_tcping(host, 443)
+            if avg443 != "Timeout" and loss443 != "100%":
+                result = f"{host},TCP:443,{avg443},{loss443}{ip_part}"
+                return idx, result
+
+            # 全部失败
+            result = f"{host},ALL_FAIL,Timeout,100%{ip_part}"
+            return idx, result
 
     return idx, result
 
