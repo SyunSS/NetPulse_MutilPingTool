@@ -369,6 +369,7 @@ def worker(idx, host, port):
 def run_once():
 
     print("\n===== NetPulse 执行开始 =====\n")
+    print("💡 实时结果为完成顺序，非目标列表顺序；保存文件按列表顺序排列\n")
     log("执行开始")
 
     results = [None] * len(targets)

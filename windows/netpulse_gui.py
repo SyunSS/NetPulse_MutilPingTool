@@ -1603,6 +1603,8 @@ class App(ctk.CTk):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.result_q.put(("log",
             f"\n{'='*50}\n⚡ NetPulse 执行开始  [{ts}]\n{'='*50}\n", "accent"))
+        self.result_q.put(("log",
+            "💡 实时结果为完成顺序，非目标列表顺序；保存文件按列表顺序排列\n", "warning"))
         self.result_q.put(("set_status", f"测试中... 共 {len(targets)} 个目标"))
         self.result_q.put(("reset_stats",))
         self.result_q.put(("clear_active",))
