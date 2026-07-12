@@ -311,6 +311,13 @@ def run_tcping(host, port):
 # ==================================================
 # Worker
 # ==================================================
+def _is_all_lost(loss_str):
+    try:
+        return float(loss_str.replace("%", "")) >= 100.0
+    except (ValueError, AttributeError):
+        return loss_str == "100%"
+
+
 def worker(idx, host, port):
     if mode == "1":
         resolved = resolve_host(host)
@@ -336,7 +343,7 @@ def worker(idx, host, port):
 
             # 第一步: ICMP
             avg, loss = run_ping(host)
-            if avg != "Timeout" and loss != "100%":
+            if avg != "Timeout" and not _is_all_lost(loss):
                 result = f"{host},ICMP,{avg},{loss}{ip_part}"
                 return idx, result
 
@@ -347,13 +354,13 @@ def worker(idx, host, port):
 
             # 第二步: TCP 80
             avg80, loss80 = run_tcping(host, 80)
-            if avg80 != "Timeout" and loss80 != "100%":
+            if avg80 != "Timeout" and not _is_all_lost(loss80):
                 result = f"{host},TCP:80,{avg80},{loss80}{ip_part}"
                 return idx, result
 
             # 第三步: TCP 443
             avg443, loss443 = run_tcping(host, 443)
-            if avg443 != "Timeout" and loss443 != "100%":
+            if avg443 != "Timeout" and not _is_all_lost(loss443):
                 result = f"{host},TCP:443,{avg443},{loss443}{ip_part}"
                 return idx, result
 

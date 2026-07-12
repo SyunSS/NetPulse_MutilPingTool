@@ -460,6 +460,14 @@ def resolve_host(host):
         return ""
 
 
+def _is_all_lost(loss_str):
+    """判断丢包率是否为 100%（兼容 '100%' / '100.0%' / '100.00%' 等格式）"""
+    try:
+        return float(loss_str.replace("%", "")) >= 100.0
+    except (ValueError, AttributeError):
+        return loss_str == "100%"
+
+
 def worker_func(idx, host, port, mode, cfg, base_dir, enable_fallback=True):
     ping_count   = cfg.getint("GENERAL", "PingCount",      fallback=4)
     tcp_count    = cfg.getint("GENERAL", "TcpingCount",    fallback=4)
@@ -483,16 +491,16 @@ def worker_func(idx, host, port, mode, cfg, base_dir, enable_fallback=True):
         else:
             # 无端口：根据开关决定是否级联回退
             avg, loss = run_ping(host, ping_count)
-            if avg != "Timeout" and loss != "100%":
+            if avg != "Timeout" and not _is_all_lost(loss):
                 proto = "ICMP"
             elif enable_fallback:
                 avg80, loss80 = run_tcping(host, 80, tcp_count, base_dir)
-                if avg80 != "Timeout" and loss80 != "100%":
+                if avg80 != "Timeout" and not _is_all_lost(loss80):
                     avg, loss = avg80, loss80
                     proto = "TCP:80"
                 else:
                     avg443, loss443 = run_tcping(host, 443, tcp_count, base_dir)
-                    if avg443 != "Timeout" and loss443 != "100%":
+                    if avg443 != "Timeout" and not _is_all_lost(loss443):
                         avg, loss = avg443, loss443
                         proto = "TCP:443"
                     else:
@@ -527,16 +535,16 @@ def worker_func_with_progress(idx, host, port, mode, cfg, base_dir, result_q, pi
         else:
             # 无端口：根据开关决定是否级联回退
             avg, loss = run_ping_with_progress(host, ping_count, progress_callback, stop_event=stop_event)
-            if avg != "Timeout" and loss != "100%":
+            if avg != "Timeout" and not _is_all_lost(loss):
                 proto = "ICMP"
             elif enable_fallback:
                 avg80, loss80 = run_tcping_with_progress(host, 80, tcp_count, base_dir, progress_callback, stop_event=stop_event)
-                if avg80 != "Timeout" and loss80 != "100%":
+                if avg80 != "Timeout" and not _is_all_lost(loss80):
                     avg, loss = avg80, loss80
                     proto = "TCP:80"
                 else:
                     avg443, loss443 = run_tcping_with_progress(host, 443, tcp_count, base_dir, progress_callback, stop_event=stop_event)
-                    if avg443 != "Timeout" and loss443 != "100%":
+                    if avg443 != "Timeout" and not _is_all_lost(loss443):
                         avg, loss = avg443, loss443
                         proto = "TCP:443"
                     else:
