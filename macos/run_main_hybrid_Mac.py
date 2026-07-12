@@ -283,6 +283,13 @@ def run_tcping(host, port):
 # ==================================================
 # Worker
 # ==================================================
+def _is_all_lost(loss_str):
+    try:
+        return float(loss_str.replace("%", "")) >= 100.0
+    except (ValueError, AttributeError):
+        return loss_str == "100%"
+
+
 def worker(idx, host, port):
     if mode == "1":
         # ICMP 模式：解析 DNS 并显示 IP
@@ -313,7 +320,7 @@ def worker(idx, host, port):
 
         # 第一步: ICMP ping
         avg, loss, stddev = run_ping(host)
-        if avg != "Timeout" and loss != "100%":
+        if avg != "Timeout" and not _is_all_lost(loss):
             return idx, f"{host},ICMP,{avg},{loss},{stddev}{ip_part}"
 
         # 开关关闭则直接返回 ICMP 结果
@@ -322,12 +329,12 @@ def worker(idx, host, port):
 
         # 第二步: TCP 80
         avg80, loss80 = run_tcping(host, 80)
-        if avg80 != "Timeout" and loss80 != "100%":
+        if avg80 != "Timeout" and not _is_all_lost(loss80):
             return idx, f"{host},TCP:80,{avg80},{loss80}{ip_part}"
 
         # 第三步: TCP 443
         avg443, loss443 = run_tcping(host, 443)
-        if avg443 != "Timeout" and loss443 != "100%":
+        if avg443 != "Timeout" and not _is_all_lost(loss443):
             return idx, f"{host},TCP:443,{avg443},{loss443}{ip_part}"
 
         # 全部失败: 判定不通
