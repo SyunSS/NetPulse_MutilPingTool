@@ -56,7 +56,7 @@ def _terminate_process(proc):
 
 def _run_probe_process(cmd, idle_timeout, line_callback=None, stop_event=None,
                        startupinfo=None, encoding="utf-8"):
-    """Stop a probe after no successful response for the configured interval."""
+    """Run a probe to completion while still allowing user cancellation."""
     proc = None
     lines = []
     output_q = queue.Queue()
@@ -378,7 +378,8 @@ def run_ping_with_progress(host, count, progress_callback=None, timeout_mult=3, 
 
         out = _run_probe_process(
             cmd,
-            idle_timeout=timeout_mult,
+            # A missed packet must not cancel the remaining probes.
+            idle_timeout=count * timeout_mult + 1,
             line_callback=handle_line,
             stop_event=stop_event,
             startupinfo=startupinfo,
@@ -426,11 +427,17 @@ def run_tcping(host, port, count, base_dir, timeout_mult=3):
         # Some tcping versions are stopped before printing the final summary.
         # Derive loss from the responses in that case instead of keeping 100%.
         stat_m = re.search(
-            r"(\d+)\s+probes sent\.\s+(\d+)\s+successful,\s+(\d+)\s+failed\.",
-            out, re.IGNORECASE,
+            r"(\d+)\s+probes sent\.\s+(\d+)\s+successful,\s+(\d+)\s+failed\."
+            r"|(?:\((\d+)\s+successful\).*?\((\d+)\s+unsuccessful\))",
+            out, re.IGNORECASE | re.DOTALL,
         )
         if stat_m:
-            loss = f"{int(stat_m.group(3)) * 100 / int(stat_m.group(1)):.1f}%"
+            if stat_m.group(1):
+                probes, failed = int(stat_m.group(1)), int(stat_m.group(3))
+            else:
+                successful, failed = int(stat_m.group(4)), int(stat_m.group(5))
+                probes = successful + failed
+            loss = f"{failed * 100 / probes:.1f}%" if probes else "100%"
         elif count > 0:
             loss = f"{(count - len(times)) * 100 / count:.1f}%"
     except Exception:
@@ -474,18 +481,25 @@ def run_tcping_with_progress(host, port, count, base_dir, progress_callback=None
 
         out = _run_probe_process(
             cmd,
-            idle_timeout=timeout_mult,
+            # Allow the configured probe count to finish despite consecutive failures.
+            idle_timeout=count * timeout_mult + 1,
             line_callback=handle_line,
             stop_event=stop_event,
             startupinfo=startupinfo,
         )
         
         stat_m = re.search(
-            r"(\d+)\s+probes sent\.\s+(\d+)\s+successful,\s+(\d+)\s+failed\.",
-            out, re.IGNORECASE,
+            r"(\d+)\s+probes sent\.\s+(\d+)\s+successful,\s+(\d+)\s+failed\."
+            r"|(?:\((\d+)\s+successful\).*?\((\d+)\s+unsuccessful\))",
+            out, re.IGNORECASE | re.DOTALL,
         )
         if stat_m:
-            loss = f"{int(stat_m.group(3)) * 100 / int(stat_m.group(1)):.1f}%"
+            if stat_m.group(1):
+                probes, failed = int(stat_m.group(1)), int(stat_m.group(3))
+            else:
+                successful, failed = int(stat_m.group(4)), int(stat_m.group(5))
+                probes = successful + failed
+            loss = f"{failed * 100 / probes:.1f}%" if probes else "100%"
         elif count > 0:
             loss = f"{(count - len(times)) * 100 / count:.1f}%"
     except Exception:

@@ -258,7 +258,7 @@ def run_ping(host):
     try:
         cmd = ["ping", "-n", str(PingCount), "-w", "3000", host]
         out = run_probe_process(
-            cmd, idle_timeout=3, encoding="gbk",
+            cmd, idle_timeout=PingCount * 3 + 1, encoding="gbk",
             is_reply=lambda line: "来自" in line or "Reply from" in line
         )
 
@@ -315,7 +315,7 @@ def run_tcping(host, port):
 
     try:
         out = run_probe_process(
-            cmd, idle_timeout=3,
+            cmd, idle_timeout=TcpingCount * 3 + 1,
             is_reply=lambda line: "time=" in line.lower()
         )
 
@@ -331,12 +331,16 @@ def run_tcping(host, port):
 
         # Use observed replies when the process ends before its summary line.
         stat_match = re.search(
-            r"(\d+)\s+probes sent\.\s+(\d+)\s+successful,\s+(\d+)\s+failed\.",
-            out, re.IGNORECASE,
+            r"(\d+)\s+probes sent\.\s+(\d+)\s+successful,\s+(\d+)\s+failed\."
+            r"|(?:\((\d+)\s+successful\).*?\((\d+)\s+unsuccessful\))",
+            out, re.IGNORECASE | re.DOTALL,
         )
         if stat_match:
-            probes = int(stat_match.group(1))
-            failed = int(stat_match.group(3))
+            if stat_match.group(1):
+                probes, failed = int(stat_match.group(1)), int(stat_match.group(3))
+            else:
+                successful, failed = int(stat_match.group(4)), int(stat_match.group(5))
+                probes = successful + failed
             loss = f"{failed * 100 / probes:.1f}%" if probes else "100%"
         elif TcpingCount > 0:
             loss = f"{(TcpingCount - len(times)) * 100 / TcpingCount:.1f}%"
