@@ -423,9 +423,16 @@ def run_tcping(host, port, count, base_dir, timeout_mult=3):
                     times.append(ms)
                 except Exception:
                     pass
-        fail_m = re.search(r"\(([\d\.]+)%\s*fail\)", out, re.IGNORECASE)
-        if fail_m:
-            loss = f"{fail_m.group(1)}%"
+        # Some tcping versions are stopped before printing the final summary.
+        # Derive loss from the responses in that case instead of keeping 100%.
+        stat_m = re.search(
+            r"(\d+)\s+probes sent\.\s+(\d+)\s+successful,\s+(\d+)\s+failed\.",
+            out, re.IGNORECASE,
+        )
+        if stat_m:
+            loss = f"{int(stat_m.group(3)) * 100 / int(stat_m.group(1)):.1f}%"
+        elif count > 0:
+            loss = f"{(count - len(times)) * 100 / count:.1f}%"
     except Exception:
         return "Timeout", "100%"
     if not times:
@@ -473,9 +480,14 @@ def run_tcping_with_progress(host, port, count, base_dir, progress_callback=None
             startupinfo=startupinfo,
         )
         
-        fail_m = re.search(r"\(([\d\.]+)%\s*fail\)", out, re.IGNORECASE)
-        if fail_m:
-            loss = f"{fail_m.group(1)}%"
+        stat_m = re.search(
+            r"(\d+)\s+probes sent\.\s+(\d+)\s+successful,\s+(\d+)\s+failed\.",
+            out, re.IGNORECASE,
+        )
+        if stat_m:
+            loss = f"{int(stat_m.group(3)) * 100 / int(stat_m.group(1)):.1f}%"
+        elif count > 0:
+            loss = f"{(count - len(times)) * 100 / count:.1f}%"
     except Exception:
         return "Timeout", "100%"
     if not times:

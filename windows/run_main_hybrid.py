@@ -329,9 +329,17 @@ def run_tcping(host, port):
                 except:
                     pass
 
-        fail_match = re.search(r"\(([\d\.]+)%\s*fail\)", out, re.IGNORECASE)
-        if fail_match:
-            loss = f"{fail_match.group(1)}%"
+        # Use observed replies when the process ends before its summary line.
+        stat_match = re.search(
+            r"(\d+)\s+probes sent\.\s+(\d+)\s+successful,\s+(\d+)\s+failed\.",
+            out, re.IGNORECASE,
+        )
+        if stat_match:
+            probes = int(stat_match.group(1))
+            failed = int(stat_match.group(3))
+            loss = f"{failed * 100 / probes:.1f}%" if probes else "100%"
+        elif TcpingCount > 0:
+            loss = f"{(TcpingCount - len(times)) * 100 / TcpingCount:.1f}%"
 
     except Exception as e:
         log(f"TCPING 异常 {host}:{port}: {e}")
